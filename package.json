@@ -1,30 +1,27 @@
 {
-  "name": "rebase-absorb",
+  "name": "krater",
   "version": "1.0.0",
   "private": true,
-  "description": "A pool whose reserves are real tokens it holds itself, so anything that happens to those tokens happens to the people who supplied them.",
+  "type": "module",
+  "description": "A NEAR pool whose reserves are the real NEP-141 balances it holds",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/nirholas/rebase-absorb.git"
+    "url": "https://github.com/nirholas/near-krater.git"
   },
-  "homepage": "https://rebase-absorb.pages.dev",
-  "keywords": [
-    "uniswap",
-    "uniswap-v4",
-    "uniswap-hooks",
-    "defi",
-    "amm",
-    "solidity",
-    "curve",
-    "rebasing",
-    "fee-on-transfer",
-    "custom-curve",
-    "no-admin"
-  ],
+  "engines": {
+    "node": ">=22.22.2",
+    "pnpm": ">=10.4.1"
+  },
+  "packageManager": "pnpm@10.4.1",
   "scripts": {
-    "build": "node web/build.mjs",
-    "contracts:build": "forge build",
-    "contracts:test": "forge test"
+    "demo": "node scripts/demo.js",
+    "measure": "node scripts/measure.js",
+    "test": "node --test tests/pool.test.js"
+  },
+  "dependencies": {
+    "near-api-js": "7.5.3",
+    "near-kit": "0.20.2",
+    "near-sandbox": "0.3.5"
   }
 }

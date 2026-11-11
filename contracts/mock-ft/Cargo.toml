@@ -1,0 +1,18 @@
+[package]
+name = "krater-mock-ft"
+description = "Test-only NEP-141 fixtures for Krater: a rebasing token and a fee-on-transfer token"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk = { workspace = true }
+near-contract-standards = { workspace = true }
+primitive-types = { workspace = true }
+serde = { workspace = true }

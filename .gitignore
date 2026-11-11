@@ -1,22 +1,19 @@
-# Foundry
-out/
-cache/
-broadcast/*/dry-run/
-.forge-snapshots/
+# Rust build output; contract wasm lands in target/near/
+target/
 
 # Node
 node_modules/
-web/dist/
 
-# Written by script/DeployLocal.s.sol. Names addresses that exist only on the machine that ran it.
-web/local.json
-
-# Env and secrets: never commit a key or an RPC with a token in it
+# Environment and secrets
 .env
 .env.*
 !.env.example
 *.pem
 *.key
 
-.DS_Store
+# Logs and OS files
 *.log
+.DS_Store
+
+# Compiled contract artifacts outside the build directory
+*.wasm

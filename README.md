@@ -1,153 +1,149 @@
-# RebaseAbsorb
+# krater
 
-<!-- three.ws:badges -->
-[![GitHub stars](https://img.shields.io/github/stars/nirholas/rebase-absorb?style=flat&logo=github)](https://github.com/nirholas/rebase-absorb/stargazers) [![License](https://img.shields.io/github/license/nirholas/rebase-absorb?style=flat)](https://github.com/nirholas/rebase-absorb/blob/HEAD/LICENSE) [![Last commit](https://img.shields.io/github/last-commit/nirholas/rebase-absorb?style=flat)](https://github.com/nirholas/rebase-absorb/commits) [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat)](https://github.com/nirholas/rebase-absorb/pulls) [![AI agent friendly](https://img.shields.io/badge/AI%20agents-AGENTS.md%20%2B%20llms.txt-6d5dfc?style=flat)](https://github.com/nirholas/rebase-absorb/blob/HEAD/AGENTS.md)
-<!-- /three.ws:badges -->
+**A NEAR pool whose reserves are the real NEP-141 balances it holds.** A rebase, a
+dividend or a taxed transfer changes what the pool is worth, and the share holders
+own that change without an accounting step. No owner, no pause, no upgrade path.
 
+- Contract: [`contracts/pool`](contracts/pool) (Rust, near-sdk 5.30.1)
+- Manifest: [`manifest.json`](manifest.json)
+- Licence: Apache-2.0
 
-**A pool whose reserves are real tokens it holds itself, so anything that happens to those tokens happens to the people who supplied them.**
+## What it is
 
-A production Uniswap v4 hook. It holds no funds and takes no fee for itself. No owner, no pause switch, no upgrade path.
+The pool holds both tokens of a pair on its own account. The balance is the
+reserve. There is no wrapper, no claim token and no cached price to reconcile:
 
-- **Site:** https://rebase-absorb.pages.dev
-- **Catalogue:** https://hookforge.pages.dev
-- **Contract:** [`src/hooks/RebaseAbsorbHook.sol`](src/hooks/RebaseAbsorbHook.sol)
-- **Licence:** Apache-2.0
+- A **rebasing** token that gains supply raises the pool's balance directly, so
+  the next settlement quotes a larger reserve and every LP share is worth more.
+- A **fee-on-transfer** token is priced from what actually arrived, because
+  settlement reads the amount the token reports, not the amount the sender typed.
+- A **dividend or airdrop** to the pool account is the same event as a rebase:
+  it lands in the reserve and belongs to the shares.
 
-## How it works
+The pool is a constant-product curve with the fee taken from the input side and
+left in the reserve. Reserves are cached for views and refreshed by a
+permissionless sync chain; settlement always syncs first, so a trade is never
+decided from stale numbers.
 
-Uniswap v4 keeps every pool's tokens in one singleton and tracks ownership as ERC-6909 claims. That is what makes it cheap, and it has a consequence nobody has been able to work around: a claim does not rebase. If a rebasing token gains supply, the gain lands on the singleton's balance, where it belongs to no pool in particular and cannot be attributed to one, because the singleton holds the same token for every pool that trades it.
+## The primitive: NEP-141
 
-The same is true of a dividend paid to holders, and of an airdrop. The value arrives and strands. That is a property of where the tokens sit, not of v4.
+LP shares are NEP-141 on the pool account itself, not a bespoke ledger. The
+`FungibleToken` derive supplies `ft_transfer`, `ft_transfer_call`,
+`ft_total_supply`, `ft_balance_of`, `ft_metadata`, `ft_resolve_transfer` and the
+NEP-145 storage methods. Settlement enters through the same standard: a holder
+calls `ft_transfer_call` on a pair token, the token calls `ft_on_transfer` on the
+pool, and the pool quotes from the amount that call reports. `ft_transfer_call`
+with an empty message credits a deposit balance; `add_liquidity` spends those
+credits. Everything the pool emits is NEP-297 JSON, standard `krater`.
 
-A hook serving one pool is not a singleton. If the reserves live at the hook's own address, every one of those events is unambiguous: there is exactly one pool it could belong to, and its providers own it in proportion to their shares, with no accounting to do at all. The reserve is simply read as the balance, so a rebase up is already in the next quote and a rebase down is already priced in.
+## Quickstart
 
-Nothing has to notice. Holding real tokens costs more gas per swap than holding claims, and that is the whole trade. It is the right trade for exactly the tokens the claims model cannot serve.
+Requirements: Rust 1.95 or newer (edition 2024), cargo-near 0.23.0,
+near-cli-rs 0.31.1, Node 22.22.2 or newer, pnpm 10.4.1 or newer.
 
-The same measurement makes fee-on-transfer tokens work, which is a second thing v4 cannot do. Because the hook quotes from what it actually received rather than from what the trader said they sent, a token that taxes its own transfers is priced correctly with no configuration, no oracle, and nothing to keep up to date when the token changes its own fee.
+```bash
+git clone https://github.com/nirholas/near-krater && cd near-krater && cargo near build && node scripts/demo.js
+```
 
-## Prior art
+`scripts/demo.js` starts a near-sandbox chain, deploys both contracts, creates
+zero-balance accounts, and runs deposit -> add liquidity -> quote -> swap ->
+rebase -> sync -> withdraw. It needs no keys and no funds.
 
-Wrappers are the standard answer: wstETH wraps a rebasing token into a fixed-balance one, and every AMM that supports fee-on-transfer tokens (Uniswap v2's supporting-fee router onwards) does so by measuring balances in the router. On v4 the received wisdom is that rebasing tokens need a wrapper, because the singleton cannot attribute a supply change to a pool. Moving the reserves to a per-pool hook address, so that the attribution question does not arise and the balance itself is the reserve, is the contribution here. It also covers what this catalogue listed separately as DividendPassthrough, since a dividend paid to holders is the same event as a rebase from the pool's point of view.
+To run against a live network, set `RPC_URL` (and the account/key variables listed
+in the script header) instead; `scripts/deploy.sh` creates the accounts, deploys,
+initialises and registers them, and then locks the pool account.
+
+## Reproduce the numbers
+
+```bash
+node scripts/measure.js
+```
+
+The script measures gas as the transaction's own `gas_burnt` plus the `gas_burnt`
+of every receipt it produced, writes `bench.json`, and prints the six settlement
+paths plus the rebase quote delta. The headline is the `quote.deltaPercent` value
+in that file, produced by a +10% rebase followed by `sync_reserves` and the same
+quote again. No gas or delta number is stated here: it is recorded from a measured
+run, with this command, so the text cannot drift from the measurement.
+
+The sandbox path is the reproducible one; a live run needs the fixture accounts
+and two funded keys, as documented at the top of the script.
 
 ## Where it does not help
 
-Real transfers on every swap, which is more gas than the claims model and the reason v4 does not do this by default. Exact-output swaps are refused outright rather than approximated: a taxed transfer cannot deliver an exact amount to the recipient, so promising one would be a lie the contract could not keep. A taxed input needs a router that over-sends, as explained above, and is outside what a hook can fix. One swap's input is also held as a claim until the next swap or a `sweep` converts it, and a rebase that lands in that window applies to everything except that amount. Reading the balance as the reserve also means a direct transfer to the hook is a donation to every share, which is harmless but is a way to move share value without a deposit. A token that can seize or freeze balances can do so here, exactly as it can anywhere else it is held. And only the pool's own two tokens are absorbed; an airdrop of a third token sits at the hook address with no way to reach anybody.
+Holding real tokens costs more per settlement than an accounting-only design, and
+that is the trade: it is the right one for exactly the tokens the cheaper design
+cannot serve.
 
-## Using it
+- Exact-output swaps are refused by construction rather than approximated. A token
+  that taxes its own transfers cannot deliver an exact amount, so promising one
+  would be a promise the pool could not keep.
+- A direct transfer to the pool is a donation to every share. That is harmless,
+  but it is a way to move share value without a deposit.
+- A token that can freeze or seize balances can do so here, exactly as it can
+  anywhere else it is held.
+- Only the pool's own two tokens are absorbed. An airdrop of a third token sits on
+  the account with no way to reach anybody.
+- `get_quote` reads the reserve cache. It is a view of the last sync, not a live
+  read; settlement syncs first.
 
-Uniswap v4 removed `hookData` from `initialize`, so per-pool parameters arrive out of band. Fix them for a pool key whose pool does not exist yet, then initialize. Nobody can change them afterwards, including you.
+### NEAR deltas
 
-```solidity
-// This hook needs no configuration.
+- **Cached-reserve sync window.** A rebase that lands between two syncs is priced
+  at the next settlement or at the next permissionless `sync_reserves`, not
+  instantly. Every swap, liquidity add and withdrawal runs its own sync chain
+  first, so the window is the receipt-to-fill gap of one transaction, and a sync
+  started before a swap can never fill it.
+- **Taxed input is not a caller problem.** There is no router that has to over-send:
+  `ft_transfer_call` reports the net amount the pool received, and the pool quotes
+  from that.
+- **Gross, not net, swap events.** `PoolEvent::Swap.amount_out_gross` is what the
+  pool sent. If the output token taxes the payout, the trader receives less, and
+  the event does not pretend otherwise.
+- **Credited deposits are not reserves.** Balances credited by a deposit but not
+  yet spent by `add_liquidity` are subtracted from the tradeable reserves, so a
+  swapper cannot spend another account's credit. They stay withdrawable through
+  `withdraw_deposit`.
 
-poolManager.initialize(key, startingSqrtPriceX96);
-```
+## The pool account is locked
 
+`scripts/deploy.sh` deletes every access key on the pool account after
+deployment and verifies that none remain. The contract has no method that adds a
+key, no owner, no pause and no upgrade path, so after that transaction only the
+contract's own logic can move funds. Record the key-deletion transaction when a
+deployment is made; it is the evidence for the claim.
 
-### Parameters
+## Test-only fixtures
 
-This hook takes no per-pool configuration.
+`contracts/mock-ft` is a fixture, not a token to deploy for value. One binary
+provides both behaviours the pool is built for: an index that `rebase(factor_bps)`
+moves, and a transfer fee that `set_fee(bps)` sets. Both mutators are
+unauthenticated and `mint` is free, because a test has to be able to fund an exact
+balance and change the index mid-run. It exposes balances, supply, metadata, the
+index and the mutators, so a test can read the same numbers the pool reads.
 
-## What it reverts with
+## Layout
 
-| Error | Meaning |
+| Path | Contents |
 | --- | --- |
-| `AddLiquidityThroughHook()` | Liquidity belongs to the hook, not to the pool, so the pool's own path is closed. |
-| `AlreadyBound()` | This hook serves one pool, bound the first time one initializes with it. |
-| `AmountTooSmall()` | The deposit was too small to mint a share, or the withdrawal too small to return anything. |
-| `CallbackNotPoolManager()` | Only the `PoolManager` may drive the unlock callback. |
-| `ERC20InsufficientAllowance(address,uint256,uint256)` | Indicates a failure with the `spender`’s `allowance`. Used in transfers. |
-| `ERC20InsufficientBalance(address,uint256,uint256)` | Indicates an error related to the current `balance` of a `sender`. Used in transfers. |
-| `ERC20InvalidApprover(address)` | Indicates a failure with the `approver` of a token to be approved. Used in approvals. |
-| `ERC20InvalidReceiver(address)` | Indicates a failure with the token `receiver`. Used in transfers. |
-| `ERC20InvalidSender(address)` | Indicates a failure with the token `sender`. Used in transfers. |
-| `ERC20InvalidSpender(address)` | Indicates a failure with the `spender` to be approved. Used in approvals. |
-| `ExactOutputUnsupported()` | An exact-output swap cannot promise an exact receipt when the token taxes its own transfers. |
-| `InsufficientInitialLiquidity()` | The first deposit must exceed the permanently locked minimum. |
-| `InvalidFee()` | A fee at or above the whole trade is not a fee. |
-| `NoReserves()` | The pool has no reserves to quote against yet. |
-| `SafeCastOverflowedIntDowncast(uint8,int256)` | Value doesn't fit in an int of `bits` size. |
-| `SafeCastOverflowedUintToInt(uint256)` | A uint value doesn't fit in an int of `bits` size. |
-| `SafeERC20FailedOperation(address)` | An operation with an ERC-20 token failed. |
+| `contracts/pool/src/lib.rs` | contract state, `new`, metadata and credit views |
+| `contracts/pool/src/pool.rs` | quote math, `get_reserves`, `get_quote` |
+| `contracts/pool/src/shares.rs` | share and credit arithmetic, `MINIMUM_SHARES` |
+| `contracts/pool/src/ft_receiver.rs` | `ft_transfer_call` message types |
+| `contracts/pool/src/events.rs` | NEP-297 event enum |
+| `contracts/mock-ft/src/lib.rs` | rebasing / fee-on-transfer fixture |
+| `scripts/deploy.sh` | account setup, deploy, init, registration, key deletion |
+| `scripts/demo.js` | sandbox or live end-to-end run |
+| `scripts/measure.js` | gas and rebase-delta measurement, writes `bench.json` |
+| `tests/pool.test.js` | sandbox tests for the deployed surface |
+| `manifest.json` | machine-readable pool description |
 
-## The callbacks it claims
+## Origin and licence
 
-Uniswap v4 reads a hook's permissions from the low fourteen bits of its own address, which is why deploying one means mining a CREATE2 salt. This hook claims 5 of the fourteen:
-
-- `beforeInitialize`
-- `beforeAddLiquidity`
-- `beforeRemoveLiquidity`
-- `beforeSwap`
-- `beforeSwapReturnsDelta`
-
-Mask: `0x2a88`, so every deployment of this hook has an address ending in those bits.
-
-## It says what it is, on-chain
-
-Every hook in this family implements `IHookMetadata`: four view functions that let an indexer, a wallet, a router or an agent identify a hook from its address alone, with no registry in the loop.
-
-```bash
-cast call $HOOK "hookName()(string)"    # RebaseAbsorb
-cast call $HOOK "hookVersion()(string)" # 1.0.0
-cast call $HOOK "specURI()(string)"     # the machine-readable manifest
-cast call $HOOK "hookTags()(string[])"  # curve, rebasing, fee-on-transfer, custom-curve, no-admin
-```
-
-The manifest this repository ships as [`hook.json`](hook.json) is what `specURI()` points at.
-
-## Build and test
-
-```bash
-git clone --recurse-submodules https://github.com/nirholas/rebase-absorb
-cd rebase-absorb
-forge build
-forge test
-```
-
-Foundry 1.7 or newer, Solidity 0.8.26, EVM version `cancun` (Uniswap v4 requires transient storage).
-
-## Deploy
-
-```bash
-# Dry run: mines the salt and prints the address without sending anything.
-forge script script/Deploy.s.sol --rpc-url $RPC_URL
-
-# For real.
-forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast --verify
-```
-
-Needs `PRIVATE_KEY` in the environment and a funded deployer on the target chain. See [`docs/deploying.md`](docs/deploying.md).
-
-## Status
-
-**Unaudited.** Built to an audited shape, on OpenZeppelin's audited hook bases, and tested against a real `PoolManager`. No third party has reviewed it. Read "where it does not help" above before putting money behind it.
-
-Not affiliated with Uniswap Labs.
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=nirholas/rebase-absorb&type=Date)](https://www.star-history.com/#nirholas/rebase-absorb&Date)
-
-<!-- three.ws:growth -->
-## Support the project
-
-If rebase-absorb saves you time, **[star it on GitHub](https://github.com/nirholas/rebase-absorb)**. Stars are how other developers and AI agents find the repositories worth trusting, and they cost you one click.
-
-Know someone who would use it? [Post on X](https://twitter.com/intent/tweet?text=rebase-absorb%3A%20A%20pool%20whose%20reserves%20are%20real%20tokens%20it%20holds%20itself%2C%20so%20anything%20that%20happens%20to%20those%20tokens&url=https%3A%2F%2Fgithub.com%2Fnirholas%2Frebase-absorb) · [Share on Bluesky](https://bsky.app/intent/compose?text=rebase-absorb%3A%20A%20pool%20whose%20reserves%20are%20real%20tokens%20it%20holds%20itself%2C%20so%20anything%20that%20happens%20to%20those%20tokens%20https%3A%2F%2Fgithub.com%2Fnirholas%2Frebase-absorb) · [Share on LinkedIn](https://www.linkedin.com/sharing/share-offsite/?url=https%3A%2F%2Fgithub.com%2Fnirholas%2Frebase-absorb) · [Submit to Hacker News](https://news.ycombinator.com/submitlink?u=https%3A%2F%2Fgithub.com%2Fnirholas%2Frebase-absorb&t=rebase-absorb%3A%20A%20pool%20whose%20reserves%20are%20real%20tokens%20it%20holds%20itself%2C%20so%20anything%20that%20happens%20to%20those%20tokens) · [Share on Reddit](https://www.reddit.com/submit?url=https%3A%2F%2Fgithub.com%2Fnirholas%2Frebase-absorb&title=rebase-absorb%3A%20A%20pool%20whose%20reserves%20are%20real%20tokens%20it%20holds%20itself%2C%20so%20anything%20that%20happens%20to%20those%20tokens)
-
-## Built for AI agents too
-
-Coding agents and LLM tooling can read this repo directly: [AGENTS.md](./AGENTS.md), [llms.txt](./llms.txt), [llms-full.txt](./llms-full.txt). Point an agent at `https://github.com/nirholas/rebase-absorb` and it has the context it needs.
-
-## More from the same author
-
-- [All repositories by nirholas](https://github.com/nirholas/nirholas#readme): the full catalog, grouped by topic
-- [three.ws](https://three.ws): the platform for 3D AI agents with Solana wallets, a skill marketplace and x402 payments
-- Questions or ideas: [open an issue](https://github.com/nirholas/rebase-absorb/issues) or [start a discussion](https://github.com/nirholas/rebase-absorb/discussions)
-
-## Contributors
-
-[![Contributors](https://contrib.rocks/image?repo=nirholas/rebase-absorb)](https://github.com/nirholas/rebase-absorb/graphs/contributors)
-
-<!-- /three.ws:growth -->
+krater is a NEAR port of [`nirholas/rebase-absorb`](https://github.com/nirholas/rebase-absorb)
+(Apache-2.0, HEAD `c1665553`), rewritten from Solidity into Rust and NEP-141. The
+origin's LICENSE and NOTICE are retained verbatim; see
+[`ATTRIBUTION.md`](ATTRIBUTION.md) for the change summary and the dependency
+licence table. The pool keeps the origin's commitments: no owner, no pause, no
+upgrade, and behaviour that treats the tokens' own mechanics as the source of
+truth.

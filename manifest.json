@@ -1,0 +1,27 @@
+{
+  "slug": "krater",
+  "name": "krater",
+  "contract": "krater-pool",
+  "version": "1.0.0",
+  "family": "AMM",
+  "summary": "A NEAR pool whose reserves are the real NEP-141 balances it holds, so a rebase, a dividend or a taxed transfer changes what the pool is worth without an accounting step.",
+  "description": "On NEAR a pool usually trusts its own cached numbers or a wrapper. Krater holds the pair tokens on its own account and treats the balance as the reserve: a rebasing token that gains supply changes the pool's balance directly, and settlement quotes from fresh balances, so the gain belongs to the share holders rather than to whichever caller moves first. The same measurement makes fee-on-transfer tokens work. Settlement arrives through NEP-141 ft_transfer_call, the token reports what the pool actually received, and the quote is computed from that net receipt, with no oracle and no per-token configuration. LP shares are themselves NEP-141, minted and burned by the pool, so they can be transferred like any other token. There is no owner, no pause and no upgrade path; after deployment the pool account's keys are deleted, leaving only the contract's own logic able to act.",
+  "priorArt": "Wrappers are the standard answer: a rebasing token is wrapped into a fixed-balance token before it reaches a pool, and AMMs that accept fee-on-transfer tokens measure balances in the router. Both work, and both add a component to trust and maintain. Holding the reserves on the pool account, so that the balance itself is the reserve and the pool measures what arrived, removes the attribution question instead of working around it. A dividend or an airdrop to the pool account is the same event as a rebase from the pool's point of view, so one mechanism covers all three.",
+  "limitation": "Settlement quotes from a reserve cache that is refreshed by a sync chain inside the same transaction, so a rebase that lands between two syncs is priced at the next swap or at the next permissionless sync, and get_quote on its own can be stale. Exact-output swaps are refused by construction rather than approximated, because a token that taxes its transfers cannot promise an exact receipt. The swap event records the gross amount the pool sends; a token that taxes the payout delivers less, and the event does not claim otherwise. Deposits that are credited but not yet added to liquidity are excluded from the tradeable reserves, so a swapper cannot spend them; they remain withdrawable through the credit path. A taxed input does not need a router that over-sends: ft_transfer_call reports the amount that actually arrived and the pool quotes from that net receipt. A direct transfer to the pool is a donation to every share, a token that can freeze or seize balances can do so here, and an airdrop of a third token sits on the account with no way to reach anybody. The pool account is locked after deployment: no owner, no pause, no upgrade, and no key that could add one.",
+  "tags": [
+    "curve",
+    "rebasing",
+    "fee-on-transfer",
+    "custom-curve",
+    "no-admin"
+  ],
+  "recommendedChains": [
+    "testnet",
+    "mainnet"
+  ],
+  "source": "contracts/pool/src/lib.rs",
+  "docs": null,
+  "repo": "https://github.com/nirholas/near-krater",
+  "site": null,
+  "deployments": []
+}
