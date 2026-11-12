@@ -251,7 +251,7 @@ async function main() {
         tokenId,
         "ft_transfer_call",
         { receiver_id: poolId, amount: (2n * TOKEN_SCALE).toString(), msg: "" },
-        { gas: 60, deposit: "1" },
+        { gas: 100, deposit: "1" },
       );
     }
 
@@ -278,7 +278,7 @@ async function main() {
 
     // +10% on the first token, then the permissionless sync, then the same quote.
     await call(alice, rebasingId, "rebase", { factor_bps: 11_000 }, { gas: 30 });
-    gas.sync_reserves = gasBurnt(await call(alice, poolId, "sync_reserves", {}, { gas: 25 }));
+    gas.sync_reserves = gasBurnt(await call(alice, poolId, "sync_reserves", {}, { gas: 60 }));
 
     const reservesAfterSync = await view(provider, poolId, "get_reserves");
     const quoteAfter = await view(provider, poolId, "get_quote", {
@@ -295,7 +295,7 @@ async function main() {
     const beforeWithdraw = await balances(provider, [rebasingId, taxedId], alice.accountId);
     gas.withdraw = gasBurnt(
       await call(alice, poolId, "withdraw", { shares: slice.toString() }, {
-        gas: 100,
+        gas: 150,
         deposit: "1",
       }),
     );
@@ -311,7 +311,7 @@ async function main() {
           amount: TEN.toString(),
           msg: JSON.stringify({ Swap: { min_out: "0" } }),
         },
-        { gas: 60, deposit: "1" },
+        { gas: 100, deposit: "1" },
       ),
     );
 
@@ -321,7 +321,7 @@ async function main() {
       rebasingId,
       "ft_transfer_call",
       { receiver_id: poolId, amount: TEN.toString(), msg: "" },
-      { gas: 60, deposit: "1" },
+      { gas: 100, deposit: "1" },
     );
     const freshCredits = await view(provider, poolId, "get_deposits", {
       account_id: alice.accountId,
@@ -354,7 +354,7 @@ async function main() {
       { gas: 30, deposit: "1" },
     );
     await call(carol, poolId, "withdraw", { shares: carolShares.toString() }, {
-      gas: 100,
+      gas: 150,
       deposit: "1",
     });
 
@@ -370,14 +370,14 @@ async function main() {
     await register(carol, rebasingId, carol.accountId);
     gas.claim_owed = gasBurnt(
       await call(carol, poolId, "claim_owed", { token: rebasingId }, {
-        gas: 30,
+        gas: 60,
         deposit: "1",
       }),
     );
     if (BigInt(backlog[1]) > 0n) {
       await register(carol, taxedId, carol.accountId);
       await call(carol, poolId, "claim_owed", { token: taxedId }, {
-        gas: 30,
+        gas: 60,
         deposit: "1",
       });
     }

@@ -198,7 +198,7 @@ async function main() {
         tokenId,
         "ft_transfer_call",
         { receiver_id: poolId, amount: TOKEN_SCALE.toString(), msg: "" },
-        { gas: 60, deposit: "1" },
+        { gas: 100, deposit: "1" },
       );
     }
 
@@ -231,7 +231,7 @@ async function main() {
         amount: SWAP_IN.toString(),
         msg: JSON.stringify({ Swap: { min_out: "0" } }),
       },
-      { gas: 60, deposit: "1" },
+      { gas: 100, deposit: "1" },
     );
 
     const reservesAfterSwap = await view(provider, poolId, "get_reserves");
@@ -239,7 +239,7 @@ async function main() {
     // Rebase the input reserve up by ten percent and sync. Views are cache-based,
     // so the quote moves only after the sync.
     await call(alice, rebasingId, "rebase", { factor_bps: 11_000 }, { gas: 30 });
-    await call(alice, poolId, "sync_reserves", {}, { gas: 25 });
+    await call(alice, poolId, "sync_reserves", {}, { gas: 60 });
     const reservesAfterRebase = await view(provider, poolId, "get_reserves");
     const quoteAfter = await view(provider, poolId, "get_quote", {
       token_in: taxedId,
@@ -255,7 +255,7 @@ async function main() {
       throw new Error("no LP shares to withdraw; add_liquidity did not mint any");
     }
     await call(alice, poolId, "withdraw", { shares: withdrawShares.toString() }, {
-      gas: 100,
+      gas: 150,
       deposit: "1",
     });
 
@@ -267,7 +267,7 @@ async function main() {
     for (const [index, amount] of backlog.entries()) {
       if (BigInt(amount) > 0n) {
         await call(alice, poolId, "claim_owed", { token: tokens[index] }, {
-          gas: 30,
+          gas: 60,
           deposit: "1",
         });
       }

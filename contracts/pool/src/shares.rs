@@ -45,6 +45,39 @@ pub fn proportional_shares(amount: u128, reserve: u128, supply: u128) -> u128 {
     narrow(U256::from(amount) * U256::from(supply) / U256::from(reserve))
 }
 
+/// Nominal value released by `shares` of the supply against `reserve`:
+/// `shares * reserve / supply`, rounded down.
+///
+/// A zero reserve or supply has no ratio and yields zero, so a withdrawal from an
+/// empty side pays nothing instead of dividing by zero.
+pub fn proportional_amount(shares: u128, reserve: u128, supply: u128) -> u128 {
+    if reserve == 0 || supply == 0 {
+        return 0;
+    }
+    narrow(U256::from(shares) * U256::from(reserve) / U256::from(supply))
+}
+
+/// Nominal value `shares` of the supply must add to `reserve`:
+/// `ceil(shares * reserve / supply)`.
+///
+/// Spending rounds up, so a mint never dilutes the pool by the depositor's own
+/// rounding. A zero reserve or supply has no ratio and yields zero, which is how a
+/// one-sided add spends nothing on the empty side.
+pub fn proportional_amount_ceil(shares: u128, reserve: u128, supply: u128) -> u128 {
+    if reserve == 0 || supply == 0 {
+        return 0;
+    }
+    let numerator = U256::from(shares) * U256::from(reserve);
+    if numerator == U256::zero() {
+        return 0;
+    }
+    // `(n - 1) / d + 1` is `ceil(n / d)` and cannot overflow the way
+    // `(n + d - 1) / d` can when both operands sit near `u128::MAX`.
+    narrow(
+        (numerator - U256::from(1u128)) / U256::from(supply) + U256::from(1u128),
+    )
+}
+
 /// Credit shares for a nominal deposit: `amount * ONE / index`, rounded down.
 ///
 /// # Panics
