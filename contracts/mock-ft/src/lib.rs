@@ -51,10 +51,14 @@ const DECIMALS: u8 = 18;
 /// Gas reserved for `ft_resolve_transfer`, which `ft_transfer_call` chains after
 /// the receiver's `ft_on_transfer`.
 ///
-/// 5 Tgas is the NEP-141 reference reservation. The receiver call gets weight 1
-/// and therefore all the remaining unused gas: a client that attaches 60 Tgas
-/// leaves about 55 Tgas for the pool's sync -> fill chain.
+/// 5 Tgas is the NEP-141 reference reservation. The receiver call is given the
+/// rest of the prepaid gas minus a small execution margin as static gas, because
+/// distributing unused gas by weight lost about half the budget at every hop in
+/// the sandbox and the pool's four-callback sync never reached its settlement.
 const GAS_FOR_RESOLVE: Gas = Gas::from_tgas(5);
+
+/// Gas kept by `ft_transfer_call` itself for the fee transfer and ledger writes.
+const GAS_FOR_TOKEN_EXEC: Gas = Gas::from_tgas(5);
 
 /// A rebasing, optionally tax-on-transfer, NEP-141 fixture.
 #[derive(PanicOnDefault)]
@@ -302,8 +306,14 @@ impl Contract {
         assert_one_yocto();
         let sender_id = env::predecessor_account_id();
         let credited = self.transfer_with_fee(&sender_id, &receiver_id, amount.0, memo.as_deref());
+        let receiver_gas = env::prepaid_gas()
+            .saturating_sub(GAS_FOR_RESOLVE)
+            .saturating_sub(GAS_FOR_TOKEN_EXEC);
+        if receiver_gas.as_gas() == 0 {
+            env::panic_str("InsufficientGas");
+        }
         ext_ft_receiver::ext(receiver_id.clone())
-            .with_unused_gas_weight(1)
+            .with_static_gas(receiver_gas)
             .ft_on_transfer(sender_id.clone(), U128(credited), msg)
             .then(
                 Self::ext_self()

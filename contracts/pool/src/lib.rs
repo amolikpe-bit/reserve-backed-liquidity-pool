@@ -31,7 +31,8 @@ mod unit_tests;
 use near_sdk::json_types::U128;
 use near_sdk::store::LookupMap;
 use near_sdk::{
-    assert_one_yocto, env, ext_contract, near, AccountId, Gas, NearToken, Promise, PromiseError,
+    assert_one_yocto, env, ext_contract, near, AccountId, Gas, NearToken, PanicOnDefault, Promise,
+    PromiseError,
 };
 use near_sdk_contract_tools::ft::{
     ContractMetadata, FungibleToken, Nep141Burn, Nep141Controller, Nep141Mint, Nep145Controller,
@@ -41,6 +42,15 @@ use near_sdk_contract_tools::ft::{
 use crate::events::PoolEvent;
 use crate::ft_receiver::FtMetadata;
 use crate::shares::MINIMUM_SHARES;
+
+/// Borrow an account as the reference type the NEP-141/NEP-145 controllers take.
+///
+/// `AccountId` implements both `AsRef<str>` and `AsRef<AccountIdRef>`, so writing
+/// `.as_ref()` directly at a generic call site is ambiguous. This helper pins the
+/// intended target.
+pub(crate) fn account_ref(account_id: &AccountId) -> &near_sdk::AccountIdRef {
+    account_id.as_ref()
+}
 
 /// Basis-point denominator. A fee of `swap_fee_bps` is taken from the input side
 /// of every swap and stays in the reserve it arrived in.
@@ -83,6 +93,23 @@ pub const GAS_FOR_SETTLE: Gas = Gas::from_tgas(45);
 /// covers its static budget plus this much. A chain that cannot afford it refunds
 /// instead of leaving the flow in a slot no later call would drain.
 pub const GAS_DISPATCH_HEADROOM: Gas = Gas::from_tgas(2);
+
+/// Static gas for each hop of the four-callback reserve-sync chain.
+///
+/// Each callback is given exactly what it must reserve for the next view call
+/// plus the next callback, with a small execution margin. Static gas is
+/// predictable; distributing unused gas by weight was halving the budget at
+/// every hop in the sandbox, so the chain never reached its settlement. The
+/// descending budget is the remaining chain: 90 -> 80 -> 70 -> 60 Tgas.
+pub const GAS_FOR_ON_INDEX_A: Gas = Gas::from_tgas(90);
+pub const GAS_FOR_ON_BALANCE_A: Gas = Gas::from_tgas(80);
+pub const GAS_FOR_ON_INDEX_B: Gas = Gas::from_tgas(70);
+pub const GAS_FOR_ON_BALANCE_B: Gas = Gas::from_tgas(60);
+
+/// Static gas for the deposit and credit-withdrawal callbacks.
+pub const GAS_FOR_DEPOSIT_INDEX: Gas = Gas::from_tgas(40);
+pub const GAS_FOR_DEPOSIT_METADATA: Gas = Gas::from_tgas(25);
+pub const GAS_FOR_WITHDRAW_INDEX: Gas = Gas::from_tgas(40);
 
 /// Storage the pool registers for itself on its own share ledger.
 ///
@@ -274,7 +301,7 @@ impl Contract {
 
         contract.set_metadata(&ContractMetadata::new(share_name, share_symbol, 18));
         contract
-            .deposit_to_storage_account(env::current_account_id().as_ref(), POOL_STORAGE_DEPOSIT)
+            .deposit_to_storage_account(account_ref(&env::current_account_id()), POOL_STORAGE_DEPOSIT)
             .unwrap_or_else(|_| env::panic_str("StorageDepositError"));
 
         contract
@@ -403,8 +430,8 @@ impl Contract {
         // an unregistered receiver. Checked here, where the failure can be
         // reported and the credits refunded instead of reverting the receipt.
         let pool_id = env::current_account_id();
-        if Nep145Controller::get_storage_balance(self, plan.owner.as_ref()).is_err()
-            || Nep145Controller::get_storage_balance(self, pool_id.as_ref()).is_err()
+        if Nep145Controller::get_storage_balance(self, account_ref(&plan.owner)).is_err()
+            || Nep145Controller::get_storage_balance(self, account_ref(&pool_id)).is_err()
         {
             self.fail_add_liquidity(&plan.owner, "ReceiverNotRegistered");
             return;
@@ -418,7 +445,7 @@ impl Contract {
         if plan.first {
             // The first add locks MINIMUM_SHARES to the pool itself, so the share
             // supply can never be driven to zero.
-            if let Err(err) = self.mint(&Nep141Mint::new(MINIMUM_SHARES, pool_id.as_ref())) {
+            if let Err(err) = self.mint(&Nep141Mint::new(MINIMUM_SHARES, account_ref(&pool_id))) {
                 env::log_str(&format!("locked share mint failed: {err:?}"));
                 self.restore_add(&plan);
                 self.fail_add_liquidity(&plan.owner, "DepositError");
@@ -426,13 +453,13 @@ impl Contract {
             }
         }
 
-        if let Err(err) = self.mint(&Nep141Mint::new(plan.shares, plan.owner.as_ref())) {
+        if let Err(err) = self.mint(&Nep141Mint::new(plan.shares, account_ref(&plan.owner))) {
             env::log_str(&format!("share mint failed: {err:?}"));
             if plan.first {
                 // Undo the lock so the failed add leaves no supply behind. A burn
                 // of shares this receipt just minted cannot fail; a panic here
                 // would revert the whole receipt, which is the correct fallback.
-                self.burn(&Nep141Burn::new(MINIMUM_SHARES, pool_id.as_ref()))
+                self.burn(&Nep141Burn::new(MINIMUM_SHARES, account_ref(&pool_id)))
                     .unwrap_or_else(|_| env::panic_str("WithdrawError"));
             }
             self.restore_add(&plan);
@@ -496,8 +523,8 @@ impl Contract {
     ///
     /// Reserves were just synced, so the pro-rata amounts use fresh balances. A leg
     /// that rounds to zero is skipped: a zero-amount `ft_transfer` panics in the
-    /// reference FT. Both legs zero is a named panic *before* the burn, so a
-    /// worthless withdrawal cannot destroy shares.
+    /// reference FT. Every rejection logs and returns: the slot was already taken,
+    /// so a panic here would revert the take and leave the pool permanently busy.
     #[private]
     pub fn settle_withdraw(&mut self) {
         let Some(pending) = self.pending_withdraw.take() else {
@@ -506,19 +533,22 @@ impl Contract {
         let supply = Nep141Controller::total_supply(self);
         if supply == 0 || pending.shares > supply {
             // Nobody can hold more than the supply, and the burn below would say
-            // the same; failing here keeps the pro-rata products in range.
-            env::panic_str("WithdrawError");
+            // the same; returning here keeps the pro-rata products in range and
+            // leaves the slot drained.
+            env::log_str("withdraw rejected: shares exceed supply");
+            return;
         }
 
         let amount_a = shares::proportional_amount(pending.shares, self.reserve_a, supply);
         let amount_b = shares::proportional_amount(pending.shares, self.reserve_b, supply);
         if amount_a == 0 && amount_b == 0 {
-            env::panic_str("AmountTooSmall");
+            env::log_str("withdraw rejected: both legs round to zero");
+            return;
         }
 
-        if let Err(err) = self.burn(&Nep141Burn::new(pending.shares, pending.owner_id.as_ref())) {
+        if let Err(err) = self.burn(&Nep141Burn::new(pending.shares, account_ref(&pending.owner_id))) {
             env::log_str(&format!("share burn failed: {err:?}"));
-            env::panic_str("WithdrawError");
+            return;
         }
 
         let token_a = self.token_a.clone();
@@ -854,7 +884,13 @@ impl Contract {
             .as_gas()
             .saturating_add(GAS_DISPATCH_HEADROOM.as_gas());
         if remaining_gas() > budget {
-            token_transfer(token, recipient, amount).detach();
+            token_transfer(token, recipient, amount)
+                .then(
+                    Contract::ext_self()
+                        .with_static_gas(GAS_FOR_SYNC_CALLBACK)
+                        .owed_restore_callback(recipient.clone(), token.clone(), U128(amount)),
+                )
+                .detach();
             return true;
         }
 

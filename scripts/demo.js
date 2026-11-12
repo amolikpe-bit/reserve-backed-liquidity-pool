@@ -26,8 +26,9 @@ const ONE = 10n ** 18n;
 const TOKEN_SCALE = 1_000n * ONE;
 const SWAP_IN = 10n * ONE;
 
-const POOL_WASM = process.env.POOL_WASM ?? "target/near/krater_pool.wasm";
-const MOCK_FT_WASM = process.env.MOCK_FT_WASM ?? "target/near/krater_mock_ft.wasm";
+const POOL_WASM = process.env.POOL_WASM ?? "target/near/krater_pool/krater_pool.wasm";
+const MOCK_FT_WASM =
+  process.env.MOCK_FT_WASM ?? "target/near/krater_mock_ft/krater_mock_ft.wasm";
 const RPC_URL = process.env.RPC_URL;
 const GAS = (tgas) => teraToGas(String(tgas));
 
@@ -198,7 +199,7 @@ async function main() {
         tokenId,
         "ft_transfer_call",
         { receiver_id: poolId, amount: TOKEN_SCALE.toString(), msg: "" },
-        { gas: 100, deposit: "1" },
+        { gas: 200, deposit: "1" },
       );
     }
 
@@ -212,7 +213,7 @@ async function main() {
       poolId,
       "add_liquidity",
       { amounts: credits, min_shares: "1" },
-      { gas: 100, deposit: "1" },
+      { gas: 300, deposit: "1" },
     );
 
     const reservesAfterAdd = await view(provider, poolId, "get_reserves");
@@ -231,7 +232,7 @@ async function main() {
         amount: SWAP_IN.toString(),
         msg: JSON.stringify({ Swap: { min_out: "0" } }),
       },
-      { gas: 100, deposit: "1" },
+      { gas: 200, deposit: "1" },
     );
 
     const reservesAfterSwap = await view(provider, poolId, "get_reserves");
@@ -239,7 +240,7 @@ async function main() {
     // Rebase the input reserve up by ten percent and sync. Views are cache-based,
     // so the quote moves only after the sync.
     await call(alice, rebasingId, "rebase", { factor_bps: 11_000 }, { gas: 30 });
-    await call(alice, poolId, "sync_reserves", {}, { gas: 60 });
+    await call(alice, poolId, "sync_reserves", {}, { gas: 100 });
     const reservesAfterRebase = await view(provider, poolId, "get_reserves");
     const quoteAfter = await view(provider, poolId, "get_quote", {
       token_in: taxedId,

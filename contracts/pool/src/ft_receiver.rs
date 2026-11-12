@@ -27,7 +27,8 @@ use near_sdk::{
 
 use crate::events::PoolEvent;
 use crate::{
-    resolve_index, shares, Contract, ContractExt, GAS_FOR_SYNC_CALLBACK, GAS_FOR_TOKEN_VIEW,
+    resolve_index, shares, Contract, ContractExt, GAS_FOR_DEPOSIT_INDEX,
+    GAS_FOR_DEPOSIT_METADATA, GAS_FOR_SYNC_CALLBACK, GAS_FOR_TOKEN_VIEW, GAS_FOR_WITHDRAW_INDEX,
 };
 
 /// Decimals assumed for a token whose NEP-148 metadata cannot be read.
@@ -137,7 +138,7 @@ impl Contract {
                         .ft_index()
                         .then(
                             Contract::ext_self()
-                                .with_unused_gas_weight(1)
+                                .with_static_gas(GAS_FOR_DEPOSIT_INDEX)
                                 .on_deposit_index(sender_id, token_in, amount),
                         ),
                 )
@@ -170,7 +171,7 @@ impl Contract {
                     .ft_metadata()
                     .then(
                         Contract::ext_self()
-                            .with_static_gas(GAS_FOR_SYNC_CALLBACK)
+                            .with_static_gas(GAS_FOR_DEPOSIT_METADATA)
                             .on_deposit_metadata(sender_id, token, amount, U128(index)),
                     ),
             ),
@@ -230,7 +231,7 @@ impl Contract {
             .ft_index()
             .then(
                 Contract::ext_self()
-                    .with_unused_gas_weight(1)
+                    .with_static_gas(GAS_FOR_WITHDRAW_INDEX)
                     .on_withdraw_index(who, token, amount),
             )
     }

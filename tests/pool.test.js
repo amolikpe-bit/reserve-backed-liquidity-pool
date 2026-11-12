@@ -28,8 +28,9 @@ import {
 } from "near-api-js";
 import { Sandbox } from "near-kit/sandbox";
 
-const POOL_WASM = process.env.POOL_WASM ?? "target/near/krater_pool.wasm";
-const MOCK_FT_WASM = process.env.MOCK_FT_WASM ?? "target/near/krater_mock_ft.wasm";
+const POOL_WASM = process.env.POOL_WASM ?? "target/near/krater_pool/krater_pool.wasm";
+const MOCK_FT_WASM =
+  process.env.MOCK_FT_WASM ?? "target/near/krater_mock_ft/krater_mock_ft.wasm";
 const SPEC_URI = "https://raw.githubusercontent.com/nirholas/near-krater/main/manifest.json";
 const TAGS = ["curve", "rebasing", "fee-on-transfer", "custom-curve", "no-admin"];
 const E18 = 10n ** 18n;
@@ -313,12 +314,12 @@ describe("W2 flows", () => {
       receiver_id: poolId,
       amount: SEED.toString(),
       msg: "",
-    }, { gas: 100, deposit: "1" });
+    }, { gas: 200, deposit: "1" });
     await call(alice, taxedId, "ft_transfer_call", {
       receiver_id: poolId,
       amount: SEED.toString(),
       msg: "",
-    }, { gas: 100, deposit: "1" });
+    }, { gas: 200, deposit: "1" });
     assert.deepEqual(
       await view(poolId, "get_deposits", { account_id: aliceId }),
       [SEED.toString(), SEED.toString()],
@@ -327,7 +328,7 @@ describe("W2 flows", () => {
     const outcome = await callRaw(alice, poolId, "add_liquidity", {
       amounts: [SEED.toString(), SEED.toString()],
       min_shares: "0",
-    }, { gas: 100, deposit: "1" });
+    }, { gas: 300, deposit: "1" });
 
     assert.deepEqual(await view(poolId, "get_deposits", { account_id: aliceId }), ["0", "0"]);
     const shares = BigInt(await view(poolId, "ft_balance_of", { account_id: aliceId }));
@@ -372,7 +373,7 @@ describe("W2 flows", () => {
       receiver_id: poolId,
       amount: amountIn.toString(),
       msg: JSON.stringify({ Swap: { min_out: "0" } }),
-    }, { gas: 100, deposit: "1" });
+    }, { gas: 200, deposit: "1" });
 
     const afterFee = amountIn * 9_970n;
     const expectedOut = (afterFee * reservesBefore[1]) / (reservesBefore[0] * 10_000n + afterFee);
@@ -403,7 +404,7 @@ describe("W2 flows", () => {
     }));
 
     await call(bob, rebasingId, "rebase", { factor_bps: 11_000 }, { gas: 30 });
-    const syncOutcome = await callRaw(bob, poolId, "sync_reserves", {}, { gas: 60 });
+    const syncOutcome = await callRaw(bob, poolId, "sync_reserves", {}, { gas: 100 });
 
     const reservesAfter = (await view(poolId, "get_reserves")).map(BigInt);
     const expectedA = (reservesBefore[0] * 11_000n) / 10_000n;
@@ -435,7 +436,7 @@ describe("W2 flows", () => {
     const bBefore = BigInt(await view(taxedId, "ft_balance_of", { account_id: aliceId }));
 
     const outcome = await callRaw(alice, poolId, "withdraw", { shares: half.toString() },
-      { gas: 150, deposit: "1" });
+      { gas: 300, deposit: "1" });
 
     const sharesAfter = BigInt(await view(poolId, "ft_balance_of", { account_id: aliceId }));
     assert.equal(sharesAfter, sharesBefore - half);
@@ -493,7 +494,7 @@ describe("W2 flows", () => {
     );
 
     await callExpectingFailedLeg(carol, poolId, "withdraw", { shares: carried.toString() },
-      { gas: 150, deposit: "1" });
+      { gas: 300, deposit: "1" });
 
     const backlog = (await view(poolId, "get_payout_backlog", { account_id: carolId }))
       .map(BigInt);
@@ -510,8 +511,8 @@ describe("W2 flows", () => {
 
     const aBefore = BigInt(await view(rebasingId, "ft_balance_of", { account_id: carolId }));
     const bBefore = BigInt(await view(taxedId, "ft_balance_of", { account_id: carolId }));
-    await call(carol, poolId, "claim_owed", { token: rebasingId }, { gas: 60, deposit: "1" });
-    await call(carol, poolId, "claim_owed", { token: taxedId }, { gas: 60, deposit: "1" });
+    await call(carol, poolId, "claim_owed", { token: rebasingId }, { gas: 100, deposit: "1" });
+    await call(carol, poolId, "claim_owed", { token: taxedId }, { gas: 100, deposit: "1" });
 
     assert.deepEqual(await view(poolId, "get_payout_backlog", { account_id: carolId }),
       ["0", "0"]);
@@ -542,7 +543,7 @@ describe("W2 flows", () => {
       receiver_id: poolId,
       amount: amount.toString(),
       msg: JSON.stringify({ ExactOutput: { amount_out: "1" } }),
-    }, { gas: 60, deposit: "1" });
+    }, { gas: 200, deposit: "1" });
 
     assert.equal(
       BigInt(await view(taxedId, "ft_balance_of", { account_id: aliceId })),

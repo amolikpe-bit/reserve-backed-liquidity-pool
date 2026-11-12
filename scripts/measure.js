@@ -35,8 +35,9 @@ const ONE = 10n ** 18n;
 const TEN = 10n * ONE;
 const TOKEN_SCALE = 1_000n * ONE;
 
-const POOL_WASM = process.env.POOL_WASM ?? "target/near/krater_pool.wasm";
-const MOCK_FT_WASM = process.env.MOCK_FT_WASM ?? "target/near/krater_mock_ft.wasm";
+const POOL_WASM = process.env.POOL_WASM ?? "target/near/krater_pool/krater_pool.wasm";
+const MOCK_FT_WASM =
+  process.env.MOCK_FT_WASM ?? "target/near/krater_mock_ft/krater_mock_ft.wasm";
 const RPC_URL = process.env.RPC_URL;
 const GAS = (tgas) => teraToGas(String(tgas));
 
@@ -251,7 +252,7 @@ async function main() {
         tokenId,
         "ft_transfer_call",
         { receiver_id: poolId, amount: (2n * TOKEN_SCALE).toString(), msg: "" },
-        { gas: 100, deposit: "1" },
+        { gas: 200, deposit: "1" },
       );
     }
 
@@ -266,7 +267,7 @@ async function main() {
         poolId,
         "add_liquidity",
         { amounts: credits, min_shares: "1" },
-        { gas: 100, deposit: "1" },
+        { gas: 300, deposit: "1" },
       ),
     );
 
@@ -278,7 +279,7 @@ async function main() {
 
     // +10% on the first token, then the permissionless sync, then the same quote.
     await call(alice, rebasingId, "rebase", { factor_bps: 11_000 }, { gas: 30 });
-    gas.sync_reserves = gasBurnt(await call(alice, poolId, "sync_reserves", {}, { gas: 60 }));
+    gas.sync_reserves = gasBurnt(await call(alice, poolId, "sync_reserves", {}, { gas: 100 }));
 
     const reservesAfterSync = await view(provider, poolId, "get_reserves");
     const quoteAfter = await view(provider, poolId, "get_quote", {
@@ -295,7 +296,7 @@ async function main() {
     const beforeWithdraw = await balances(provider, [rebasingId, taxedId], alice.accountId);
     gas.withdraw = gasBurnt(
       await call(alice, poolId, "withdraw", { shares: slice.toString() }, {
-        gas: 150,
+        gas: 300,
         deposit: "1",
       }),
     );
@@ -311,7 +312,7 @@ async function main() {
           amount: TEN.toString(),
           msg: JSON.stringify({ Swap: { min_out: "0" } }),
         },
-        { gas: 100, deposit: "1" },
+        { gas: 200, deposit: "1" },
       ),
     );
 
@@ -321,7 +322,7 @@ async function main() {
       rebasingId,
       "ft_transfer_call",
       { receiver_id: poolId, amount: TEN.toString(), msg: "" },
-      { gas: 100, deposit: "1" },
+      { gas: 200, deposit: "1" },
     );
     const freshCredits = await view(provider, poolId, "get_deposits", {
       account_id: alice.accountId,
@@ -354,7 +355,7 @@ async function main() {
       { gas: 30, deposit: "1" },
     );
     await call(carol, poolId, "withdraw", { shares: carolShares.toString() }, {
-      gas: 150,
+      gas: 300,
       deposit: "1",
     });
 

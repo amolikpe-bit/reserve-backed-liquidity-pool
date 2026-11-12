@@ -36,6 +36,7 @@ use primitive_types::U256;
 use crate::events::PoolEvent;
 use crate::{
     resolve_index, shares, Contract, ContractExt, GAS_DISPATCH_HEADROOM, GAS_FOR_FILL,
+    GAS_FOR_ON_BALANCE_A, GAS_FOR_ON_BALANCE_B, GAS_FOR_ON_INDEX_A, GAS_FOR_ON_INDEX_B,
     GAS_FOR_SETTLE, GAS_FOR_SYNC_CALLBACK, GAS_FOR_TOKEN_VIEW, BPS,
 };
 
@@ -330,16 +331,15 @@ impl Contract {
 impl Contract {
     /// `ft_index` hop of the sync chain for `token_a`.
     ///
-    /// The view reserves static gas; the callback that follows inherits whatever
-    /// this report leaves unspent (weight 1), so the chain needs no per-hop
-    /// callback budget.
+    /// The view reserves static gas; the callback gets its own fixed budget, large
+    /// enough to reserve the next view plus the next callback.
     pub(crate) fn index_hop_a(&self, allow_fill: bool) -> Promise {
         crate::ext_ft::ext(self.token_a.clone())
             .with_static_gas(GAS_FOR_TOKEN_VIEW)
             .ft_index()
             .then(
                 Contract::ext_self()
-                    .with_unused_gas_weight(1)
+                    .with_static_gas(GAS_FOR_ON_INDEX_A)
                     .on_index_a(allow_fill),
             )
     }
@@ -351,7 +351,7 @@ impl Contract {
             .ft_index()
             .then(
                 Contract::ext_self()
-                    .with_unused_gas_weight(1)
+                    .with_static_gas(GAS_FOR_ON_INDEX_B)
                     .on_index_b(allow_fill),
             )
     }
@@ -363,7 +363,7 @@ impl Contract {
             .ft_balance_of(env::current_account_id())
             .then(
                 Contract::ext_self()
-                    .with_unused_gas_weight(1)
+                    .with_static_gas(GAS_FOR_ON_BALANCE_A)
                     .on_balance_a(allow_fill),
             )
     }
@@ -375,7 +375,7 @@ impl Contract {
             .ft_balance_of(env::current_account_id())
             .then(
                 Contract::ext_self()
-                    .with_unused_gas_weight(1)
+                    .with_static_gas(GAS_FOR_ON_BALANCE_B)
                     .on_balance_b(allow_fill),
             )
     }
