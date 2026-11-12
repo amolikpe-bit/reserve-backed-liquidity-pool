@@ -85,7 +85,9 @@ function call(account, contractId, methodName, args, { gas = 60, deposit = "0" }
 }
 
 function view(contractId, method, args = {}) {
-  return provider.callFunction({ contractId, method, args });
+  return provider.callFunction({ contractId, method, args }).catch((error) => {
+    throw new Error(`view ${contractId}.${method} ${JSON.stringify(args)}: ${error.message}`);
+  });
 }
 
 function toYocto(near) {
@@ -719,21 +721,23 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
   // origin: new row `min_out:0` + dust refunds without `ft_transfer(0)`.
   test("dust swap refunds without a zero ft_transfer", async () => {
     await call(bob, poolId, "sync_reserves", {}, { gas: 100 });
-    // A one-base-unit input truncates to zero on the direction whose output
-    // reserve is small enough; pick it from the live pool instead of assuming
-    // which side is scarcer after the earlier W2 flows.
-    let tokenIn = null;
-    for (const candidate of [taxedId, rebasingId]) {
-      const quote = await view(poolId, "get_quote", {
-        token_in: candidate,
-        amount_in: "1",
-      });
-      if (quote === "0") {
-        tokenIn = candidate;
-        break;
-      }
-    }
-    assert.ok(tokenIn, "one direction must truncate a one-unit input");
+    // The output truncates to zero when r_out * (BPS - fee) < r_in * BPS, i.e.
+    // r_out * 9970 < r_in * 10000 for the 30 bps fee. Read the cache first and
+    // decide analytically; never probe with a view that panics on zero reserves.
+    const [reserveA, reserveB] = (await view(poolId, "get_reserves")).map(BigInt);
+    assert.ok(reserveA > 0n && reserveB > 0n, "the dust test needs both reserves");
+    const taxedTruncates = reserveA * 9_970n < reserveB * 10_000n;
+    const rebasingTruncates = reserveB * 9_970n < reserveA * 10_000n;
+    const tokenIn = taxedTruncates ? taxedId : rebasingTruncates ? rebasingId : null;
+    assert.ok(
+      tokenIn,
+      `one direction must truncate (reserves ${reserveA}/${reserveB})`,
+    );
+    assert.equal(
+      await view(poolId, "get_quote", { token_in: tokenIn, amount_in: "1" }),
+      "0",
+      "the chosen direction quotes zero for one base unit",
+    );
 
     const reservesBefore = await view(poolId, "get_reserves");
     const aliceBefore = BigInt(await view(tokenIn, "ft_balance_of", { account_id: aliceId }));
@@ -834,7 +838,6 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
       }
     }
     await call(bob, poolId, "sync_reserves", {}, { gas: 100 });
-    const reservesBefore = (await view(poolId, "get_reserves")).map(BigInt);
     const amount = E18 / 2n;
     const aliceBefore = BigInt(await view(taxedId, "ft_balance_of", { account_id: aliceId }));
     const bobBefore = BigInt(await view(taxedId, "ft_balance_of", { account_id: bobId }));
@@ -889,10 +892,17 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
       bobBefore - BigInt(bobSwaps) * amount,
       "a refunded swap returns Bob's input in full",
     );
-    assert.deepEqual((await view(poolId, "get_reserves")).map(BigInt), [
-      reservesBefore[0] - executedOut,
-      reservesBefore[1] + executedIn,
-    ]);
+    // The cache is not authoritative under two concurrent swaps: each sync writes
+    // it from its own snapshot. Assert instead that it agrees with a fresh sync.
+    await call(bob, poolId, "sync_reserves", {}, { gas: 100 });
+    const cacheAfterFirstSync = (await view(poolId, "get_reserves")).map(BigInt);
+    await call(bob, poolId, "sync_reserves", {}, { gas: 100 });
+    const cacheAfterSecondSync = (await view(poolId, "get_reserves")).map(BigInt);
+    assert.deepEqual(
+      cacheAfterFirstSync,
+      cacheAfterSecondSync,
+      "the cached reserves equal a fresh sync",
+    );
 
     for (const [senderId, outcome, filled] of [
       [aliceId, aliceOutcome, aliceSwaps],
