@@ -196,12 +196,14 @@ impl Contract {
                     .get(&(account_id.clone(), self.token_a.clone()))
                     .copied()
                     .unwrap_or(0),
+                self.index_a,
             )),
             U128(shares::credit_nominal(
                 self.deposits
                     .get(&(account_id, self.token_b.clone()))
                     .copied()
                     .unwrap_or(0),
+                self.index_b,
             )),
         ]
     }

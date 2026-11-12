@@ -13,7 +13,7 @@ use near_sdk::json_types::U128;
 use near_sdk::{env, near, AccountId};
 use primitive_types::U256;
 
-use crate::{Contract, BPS};
+use crate::{Contract, ContractExt, BPS};
 
 /// Narrow a `U256` to `u128`, panicking with a named error instead of truncating.
 ///
