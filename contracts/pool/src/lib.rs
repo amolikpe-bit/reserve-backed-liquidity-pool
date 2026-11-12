@@ -38,6 +38,7 @@ use near_sdk_contract_tools::ft::{
     ContractMetadata, FungibleToken, Nep141Burn, Nep141Controller, Nep141Mint, Nep145Controller,
     Nep148Controller,
 };
+use primitive_types::U256;
 
 use crate::events::PoolEvent;
 use crate::ft_receiver::FtMetadata;
@@ -456,11 +457,15 @@ impl Contract {
         if let Err(err) = self.mint(&Nep141Mint::new(plan.shares, account_ref(&plan.owner))) {
             env::log_str(&format!("share mint failed: {err:?}"));
             if plan.first {
-                // Undo the lock so the failed add leaves no supply behind. A burn
-                // of shares this receipt just minted cannot fail; a panic here
-                // would revert the whole receipt, which is the correct fallback.
-                self.burn(&Nep141Burn::new(MINIMUM_SHARES, account_ref(&pool_id)))
-                    .unwrap_or_else(|_| env::panic_str("WithdrawError"));
+                // Undo the lock so the failed add leaves no supply behind. The
+                // burn is only refused by a broken ledger, and a panic here would
+                // revert this receipt's `take`, leaving the slot set for good, so
+                // a log keeps the receipt atomic with the refund below.
+                if let Err(err) =
+                    self.burn(&Nep141Burn::new(MINIMUM_SHARES, account_ref(&pool_id)))
+                {
+                    env::log_str(&format!("locked share unwind failed: {err:?}"));
+                }
             }
             self.restore_add(&plan);
             self.fail_add_liquidity(&plan.owner, "DepositError");
@@ -501,6 +506,10 @@ impl Contract {
     /// # Panics
     /// - `AmountTooSmall` if `shares` is zero.
     /// - `Busy` if a swap, add, withdrawal or payout is already in flight.
+    /// - `InsufficientShares` if the caller does not hold `shares`; checked here,
+    ///   before the flow slot is stored, because `settle_withdraw` burns from this
+    ///   account after the sync and a withdrawal that cannot burn would only hold
+    ///   the pool's single slot until the chain drained.
     #[payable]
     pub fn withdraw(&mut self, shares: U128) -> Promise {
         assert_one_yocto();
@@ -511,8 +520,13 @@ impl Contract {
             env::panic_str("Busy");
         }
 
+        let who = env::predecessor_account_id();
+        if Nep141Controller::balance_of(self, account_ref(&who)) < shares.0 {
+            env::panic_str("InsufficientShares");
+        }
+
         self.pending_withdraw = Some(PendingWithdraw {
-            owner_id: env::predecessor_account_id(),
+            owner_id: who,
             shares: shares.0,
         });
 
@@ -671,6 +685,30 @@ struct AddPlan {
     shares: u128,
     /// The supply was empty, so this add locks `MINIMUM_SHARES` to the pool.
     first: bool,
+}
+
+/// Whether the credit shares `amount` costs at `index` fit in `u128`:
+/// `ceil(amount * ONE / index) <= u128::MAX`, the range
+/// [`shares::credit_shares_ceil`] narrows.
+///
+/// `plan_add` runs after `pending_add_liquidity` was taken, so a `MathOverflow`
+/// panic there would revert the take and leave the slot set for good. A cost
+/// above `u128::MAX` can never be covered by a `u128` credit, so the add is
+/// refused as a short credit before the helper is called.
+fn credit_cost_fits(amount: u128, index: u128) -> bool {
+    index != 0
+        && U256::from(amount) * U256::from(shares::ONE)
+            <= U256::from(index) * U256::from(u128::MAX)
+}
+
+/// Whether the shares an add would mint fit in `u128`:
+/// `floor(amount * supply / reserve) <= u128::MAX`, the range
+/// [`shares::proportional_shares`] narrows. A zero reserve side is unbounded
+/// (`u128::MAX`) and therefore always fits.
+fn shares_fit(amount: u128, reserve: u128, supply: u128) -> bool {
+    reserve == 0
+        || U256::from(amount) * U256::from(supply)
+            < (U256::from(u128::MAX) + U256::from(1u128)) * U256::from(reserve)
 }
 
 impl Contract {
@@ -864,13 +902,18 @@ impl Contract {
     /// record it as owed when this receipt cannot fund even that.
     ///
     /// Every caller is a failure path, so the one thing this must not do is revert
-    /// the receipt that is clearing a slot: the fixed transfer budget is only
-    /// reserved when what is left covers it, and otherwise the amount becomes a
-    /// payout debt that `claim_owed` releases while the pool keeps the tokens.
+    /// the receipt that is clearing a slot: the gas for the transfer *and its
+    /// callback* is only reserved when what is left covers it, and otherwise the
+    /// amount becomes a payout debt that `claim_owed` releases while the pool keeps
+    /// the tokens.
     ///
     /// Returns `true` when the tokens are on their way out, so the caller can drop
     /// them from the cached reserve; `false` means the pool still holds them and
     /// `claim_owed` deducts them when they are paid.
+    ///
+    /// The transfer created here is chained to `owed_restore_callback`, so a token
+    /// that refuses it too records the amount in `owed` and restores the reserve:
+    /// `true` means "a transfer was started", never "the tokens arrived".
     pub(crate) fn refund(
         &mut self,
         token: &AccountId,
@@ -880,8 +923,12 @@ impl Contract {
         if amount == 0 {
             return false;
         }
+        // The transfer and its `owed_restore_callback` are two promise legs: the
+        // guard covers both plus the headroom for creating them, so a short receipt
+        // records the debt instead of failing to attach the callback.
         let budget = GAS_FOR_FT_TRANSFER
             .as_gas()
+            .saturating_add(GAS_FOR_SYNC_CALLBACK.as_gas())
             .saturating_add(GAS_DISPATCH_HEADROOM.as_gas());
         if remaining_gas() > budget {
             token_transfer(token, recipient, amount)
@@ -921,12 +968,18 @@ impl Contract {
         let (index_a, index_b) = (self.index_a, self.index_b);
         let credit_a = self.credit_of(&add.owner_id, &token_a);
         let credit_b = self.credit_of(&add.owner_id, &token_b);
+        // `credit_shares_ceil` narrows a `U256` to `u128` and panics outside the
+        // range; this function runs after the slot was taken, so an unrepresentable
+        // cost is refused as a short credit instead: no `u128` credit can cover it.
+        if !credit_cost_fits(add.amount_a, index_a) || !credit_cost_fits(add.amount_b, index_b)
+        {
+            return Err("InsufficientDeposit");
+        }
         if credit_a < shares::credit_shares_ceil(add.amount_a, index_a)
             || credit_b < shares::credit_shares_ceil(add.amount_b, index_b)
         {
             return Err("InsufficientDeposit");
         }
-
         let supply = Nep141Controller::total_supply(self);
         let (first, minted, nominal_a, nominal_b) = if supply == 0 {
             // First add: neither reserve has a ratio yet, so the shares are the
@@ -943,6 +996,15 @@ impl Contract {
             }
             (true, minted, nominal_a, nominal_b)
         } else {
+            // The same narrowing rule applies to the minted shares: refuse an add
+            // whose ratio cannot fit in `u128` instead of letting the helper panic
+            // after the slot was taken.
+            if !shares_fit(add.amount_a, self.reserve_a, supply)
+                || !shares_fit(add.amount_b, self.reserve_b, supply)
+            {
+                return Err("MathOverflow");
+            }
+
             // Later adds mint the smaller of the two ratios; a zero-reserve side is
             // unbounded (`u128::MAX`), so it cannot bind.
             let minted = core::cmp::min(

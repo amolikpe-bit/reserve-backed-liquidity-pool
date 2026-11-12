@@ -251,8 +251,7 @@ impl Contract {
         let Some(reserve_in_before) = reserve_in.checked_sub(pending.amount) else {
             // The measured reserve does not even cover the landed input, so there
             // is no pre-swap reserve to price against: refund as it stands.
-            self.refund_swap_input(&pending, false);
-            self.fill_in_flight = false;
+            self.reject_swap(&pending, false);
             return U128(0);
         };
 
@@ -265,8 +264,7 @@ impl Contract {
         if out == 0 || out < pending.min_out || out > reserve_out {
             // No price, worse than the caller's floor, or more than the pool holds:
             // a zero payout would also panic the reference FT.
-            self.refund_swap_input(&pending, true);
-            self.fill_in_flight = false;
+            self.reject_swap(&pending, true);
             return U128(0);
         }
 
@@ -291,8 +289,9 @@ impl Contract {
     ///
     /// Only the `fill_in_flight` flag this call owns is cleared, so a late or
     /// duplicated callback cannot unlock a second fill. The input refund is funded
-    /// from this callback's own budget when it fits and otherwise becomes a payout
-    /// debt, because reverting here would leave the flag set for good.
+    /// from this callback's own budget only when `refund` can cover the whole
+    /// transfer promise; with the callback's fixed budget it otherwise becomes a
+    /// payout debt, because reverting here would leave the flag set for good.
     #[private]
     pub fn output_callback(
         &mut self,
@@ -316,8 +315,11 @@ impl Contract {
                 // The output never left the pool, so it is tradeable again. The
                 // input is refunded when this receipt can still budget the
                 // transfer, and otherwise becomes a payout debt: this callback's
-                // budget is too small to reserve a transfer safely, and reverting
-                // here would leave `fill_in_flight` set.
+                // budget is too small to reserve a transfer and its callback
+                // safely, and reverting here would leave `fill_in_flight` set.
+                // The refund chained from `refund` is `owed_restore_callback`, so
+                // a token that refuses the refund too records the input in `owed`
+                // and restores its reserve there: neither leg is lost, no panic.
                 let token_out = self.other_token(&token_in);
                 self.add_reserve(&token_out, amount_out.0);
                 if self.refund(&token_in, &sender, amount_in.0) {
@@ -456,6 +458,16 @@ impl Contract {
         if self.refund(&pending.token_in, &pending.sender_id, pending.amount) && input_counted {
             self.sub_reserve(&pending.token_in, pending.amount);
         }
+    }
+
+    /// Refund a taken swap and clear the in-flight flag.
+    ///
+    /// Both rejection paths in `fill_swap` come through here, so a swap that
+    /// never pays out cannot leave `fill_in_flight` set. The input only leaves the
+    /// cached reserve when the refund transfer was actually created.
+    fn reject_swap(&mut self, pending: &crate::PendingSwap, input_counted: bool) {
+        self.refund_swap_input(pending, input_counted);
+        self.fill_in_flight = false;
     }
 }
 

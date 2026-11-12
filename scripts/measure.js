@@ -15,9 +15,9 @@
 // is how the owed balance behind claim_owed is produced. The contracts must
 // already be deployed and initialised.
 //
-// Build first: cargo near build. Override the wasm paths with POOL_WASM and
-// MOCK_FT_WASM. The measured values replace estimates; nothing here is asserted in
-// advance.
+// Build first: cargo near build non-reproducible-wasm. Override the wasm paths
+// with POOL_WASM and MOCK_FT_WASM. The measured values replace estimates; nothing
+// here is asserted in advance.
 
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
@@ -41,6 +41,15 @@ const MOCK_FT_WASM =
 const RPC_URL = process.env.RPC_URL;
 const GAS = (tgas) => teraToGas(String(tgas));
 
+// Client gas budgets in Tgas. The pool's reserve-sync chain is static gas
+// (callbacks 90/80/70/60, 25 to fill, 45 to settle), so each attachment funds
+// the whole chain it starts; one function call may attach up to 1000 Tgas.
+const GAS_CREDIT = 200; // ft_transfer_call: credit a deposit, or swap
+const GAS_ADD_LIQUIDITY = 300;
+const GAS_WITHDRAW = 300;
+const GAS_SYNC = 100;
+const GAS_PAYOUT = 100; // claim_owed, withdraw_deposit: 10 Tgas transfer + 8 Tgas callback
+
 function requireEnv(name) {
   const value = process.env[name];
   if (!value) {
@@ -54,13 +63,15 @@ function requireEnv(name) {
 async function readWasm(path) {
   if (!existsSync(path)) {
     throw new Error(
-      `missing wasm at ${path}; run "cargo near build" first, or set POOL_WASM/MOCK_FT_WASM`,
+      `missing wasm at ${path}; run "cargo near build non-reproducible-wasm" ` +
+        "first, or set POOL_WASM/MOCK_FT_WASM",
     );
   }
   return new Uint8Array(await readFile(path));
 }
 
-// Gas accounting needs the raw execution outcome, not the decoded return value.
+// Gas accounting needs the raw execution outcome, not the decoded return value,
+// and FINAL waits for the callback tree the gas is charged across.
 function call(account, contractId, methodName, args, { gas = 60, deposit = "0" } = {}) {
   return account.callFunctionRaw({
     contractId,
@@ -68,6 +79,7 @@ function call(account, contractId, methodName, args, { gas = 60, deposit = "0" }
     args,
     gas: GAS(gas),
     deposit,
+    waitUntil: "FINAL",
   });
 }
 
@@ -217,6 +229,38 @@ function gasBurnt(outcome) {
 
 const toTgas = (yocto) => Number(yocto) / 1e12;
 
+function logsOf(outcome) {
+  const logs = [...(outcome.transaction_outcome?.outcome?.logs ?? [])];
+  for (const receipt of outcome.receipts_outcome ?? []) {
+    logs.push(...(receipt.outcome?.logs ?? []));
+  }
+  return logs;
+}
+
+function kraterEvents(outcome) {
+  return logsOf(outcome)
+    .filter((line) => line.startsWith("EVENT_JSON:"))
+    .map((line) => JSON.parse(line.slice("EVENT_JSON:".length)))
+    .filter((event) => event.standard === "krater");
+}
+
+// Measure one path, refusing to report a number for a run that reverted or that
+// burnt more than the client attached to it.
+async function measured(label, outcomePromise, attachedTgas) {
+  const outcome = await outcomePromise;
+  if (outcome?.status && typeof outcome.status === "object" && outcome.status.Failure) {
+    throw new Error(`${label} reverted: ${JSON.stringify(outcome.status.Failure)}`);
+  }
+  const burnt = gasBurnt(outcome);
+  const attached = GAS(attachedTgas);
+  if (burnt > attached) {
+    throw new Error(
+      `${label} burnt ${toTgas(burnt).toFixed(3)} Tgas, above the ${attachedTgas} Tgas attached`,
+    );
+  }
+  return burnt;
+}
+
 async function balances(provider, tokenIds, accountId) {
   const [a, b] = await Promise.all(
     tokenIds.map((token) => view(provider, token, "ft_balance_of", { account_id: accountId })),
@@ -252,7 +296,7 @@ async function main() {
         tokenId,
         "ft_transfer_call",
         { receiver_id: poolId, amount: (2n * TOKEN_SCALE).toString(), msg: "" },
-        { gas: 200, deposit: "1" },
+        { gas: GAS_CREDIT, deposit: "1" },
       );
     }
 
@@ -260,15 +304,16 @@ async function main() {
       account_id: alice.accountId,
     });
 
-    const gas = {};
-    gas.add_liquidity = gasBurnt(
-      await call(
+    gas.add_liquidity = await measured(
+      "add_liquidity",
+      call(
         alice,
         poolId,
         "add_liquidity",
         { amounts: credits, min_shares: "1" },
-        { gas: 300, deposit: "1" },
+        { gas: GAS_ADD_LIQUIDITY, deposit: "1" },
       ),
+      GAS_ADD_LIQUIDITY,
     );
 
     const reservesBefore = await view(provider, poolId, "get_reserves");
@@ -279,7 +324,11 @@ async function main() {
 
     // +10% on the first token, then the permissionless sync, then the same quote.
     await call(alice, rebasingId, "rebase", { factor_bps: 11_000 }, { gas: 30 });
-    gas.sync_reserves = gasBurnt(await call(alice, poolId, "sync_reserves", {}, { gas: 100 }));
+    gas.sync_reserves = await measured(
+      "sync_reserves",
+      call(alice, poolId, "sync_reserves", {}, { gas: GAS_SYNC }),
+      GAS_SYNC,
+    );
 
     const reservesAfterSync = await view(provider, poolId, "get_reserves");
     const quoteAfter = await view(provider, poolId, "get_quote", {
@@ -294,27 +343,34 @@ async function main() {
     );
     const slice = shareBalance / 10n;
     const beforeWithdraw = await balances(provider, [rebasingId, taxedId], alice.accountId);
-    gas.withdraw = gasBurnt(
-      await call(alice, poolId, "withdraw", { shares: slice.toString() }, {
-        gas: 300,
+    gas.withdraw = await measured(
+      "withdraw",
+      call(alice, poolId, "withdraw", { shares: slice.toString() }, {
+        gas: GAS_WITHDRAW,
         deposit: "1",
       }),
+      GAS_WITHDRAW,
     );
     const afterWithdraw = await balances(provider, [rebasingId, taxedId], alice.accountId);
 
-    gas.swap = gasBurnt(
-      await call(
-        alice,
-        taxedId,
-        "ft_transfer_call",
-        {
-          receiver_id: poolId,
-          amount: TEN.toString(),
-          msg: JSON.stringify({ Swap: { min_out: "0" } }),
-        },
-        { gas: 200, deposit: "1" },
-      ),
+    const swapCall = call(
+      alice,
+      taxedId,
+      "ft_transfer_call",
+      {
+        receiver_id: poolId,
+        amount: TEN.toString(),
+        msg: JSON.stringify({ Swap: { min_out: "0" } }),
+      },
+      { gas: GAS_CREDIT, deposit: "1" },
     );
+    gas.swap = await measured("swap", swapCall, GAS_CREDIT);
+    const swapEvents = kraterEvents(await swapCall).filter((event) => event.event === "Swap");
+    if (swapEvents.length === 0) {
+      throw new Error(
+        "the swap receipt tree has no krater Swap event; it refunded instead of filling",
+      );
+    }
 
     // Deposit fresh credits, then pay them back out through withdraw_deposit.
     await call(
@@ -322,7 +378,7 @@ async function main() {
       rebasingId,
       "ft_transfer_call",
       { receiver_id: poolId, amount: TEN.toString(), msg: "" },
-      { gas: 200, deposit: "1" },
+      { gas: GAS_CREDIT, deposit: "1" },
     );
     const freshCredits = await view(provider, poolId, "get_deposits", {
       account_id: alice.accountId,
@@ -330,14 +386,16 @@ async function main() {
     if (BigInt(freshCredits[0]) === 0n) {
       throw new Error("deposit did not credit token A; cannot measure withdraw_deposit");
     }
-    gas.withdraw_deposit = gasBurnt(
-      await call(
+    gas.withdraw_deposit = await measured(
+      "withdraw_deposit",
+      call(
         alice,
         poolId,
         "withdraw_deposit",
         { token: rebasingId, amount: freshCredits[0] },
-        { gas: 60, deposit: "1" },
+        { gas: GAS_PAYOUT, deposit: "1" },
       ),
+      GAS_PAYOUT,
     );
 
     // Move shares to carol, who is registered on the pool but not on the tokens.
@@ -355,7 +413,7 @@ async function main() {
       { gas: 30, deposit: "1" },
     );
     await call(carol, poolId, "withdraw", { shares: carolShares.toString() }, {
-      gas: 300,
+      gas: GAS_WITHDRAW,
       deposit: "1",
     });
 
@@ -369,16 +427,18 @@ async function main() {
     }
 
     await register(carol, rebasingId, carol.accountId);
-    gas.claim_owed = gasBurnt(
-      await call(carol, poolId, "claim_owed", { token: rebasingId }, {
-        gas: 60,
+    gas.claim_owed = await measured(
+      "claim_owed",
+      call(carol, poolId, "claim_owed", { token: rebasingId }, {
+        gas: GAS_PAYOUT,
         deposit: "1",
       }),
+      GAS_PAYOUT,
     );
     if (BigInt(backlog[1]) > 0n) {
       await register(carol, taxedId, carol.accountId);
       await call(carol, poolId, "claim_owed", { token: taxedId }, {
-        gas: 60,
+        gas: GAS_PAYOUT,
         deposit: "1",
       });
     }

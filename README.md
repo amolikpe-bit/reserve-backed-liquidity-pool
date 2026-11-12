@@ -42,12 +42,21 @@ Requirements: Rust 1.95 or newer (edition 2024), cargo-near 0.23.0,
 near-cli-rs 0.31.1, Node 22.22.2 or newer, pnpm 10.4.1 or newer.
 
 ```bash
-git clone https://github.com/nirholas/near-krater && cd near-krater && cargo near build && node scripts/demo.js
+git clone https://github.com/nirholas/near-krater && cd near-krater && cargo near build non-reproducible-wasm && node scripts/demo.js
 ```
 
 `scripts/demo.js` starts a near-sandbox chain, deploys both contracts, creates
 zero-balance accounts, and runs deposit -> add liquidity -> quote -> swap ->
 rebase -> sync -> withdraw. It needs no keys and no funds.
+
+Registration is explicit: a NEP-141 transfer never registers its receiver, so the
+script calls `storage_deposit` on both tokens and on the pool before it moves a
+balance.
+
+`non-reproducible-wasm` is the local build: it compiles without Docker. The
+default reproducible variant runs Docker against committed source (and needs it
+pushed to deploy), and is used only for a pinned-image release, which the
+quickstart does not cover.
 
 To run against a live network, set `RPC_URL` (and the account/key variables listed
 in the script header) instead; `scripts/deploy.sh` creates the accounts, deploys,
@@ -61,13 +70,32 @@ node scripts/measure.js
 
 The script measures gas as the transaction's own `gas_burnt` plus the `gas_burnt`
 of every receipt it produced, writes `bench.json`, and prints the six settlement
-paths plus the rebase quote delta. The headline is the `quote.deltaPercent` value
-in that file, produced by a +10% rebase followed by `sync_reserves` and the same
-quote again. No gas or delta number is stated here: it is recorded from a measured
-run, with this command, so the text cannot drift from the measurement.
+paths plus the rebase quote delta. The delta comes from a +10% rebase, a
+`sync_reserves`, and the same quote again. No gas or delta number is stated in
+this README: each one is recorded from a measured run, with this command, so the
+text cannot drift from the measurement.
 
-The sandbox path is the reproducible one; a live run needs the fixture accounts
+The sandbox path needs no keys and no funds; a live run needs the fixture accounts
 and two funded keys, as documented at the top of the script.
+
+## Gas and limits
+
+Gas is static, so a caller can budget it exactly. The pool attaches 90, 80, 70 and
+60 Tgas to the four sync callbacks, 25 Tgas to the fill and 45 Tgas to the
+settlement, 8 Tgas to each terminal callback and 5 Tgas to each token view; every
+`ft_transfer` it makes carries 10 Tgas plus the one yoctoNEAR NEP-141 requires.
+The client funds that chain from the outside:
+
+- 200 Tgas per `ft_transfer_call` (credit a deposit, or swap)
+- 300 Tgas for `add_liquidity` and for `withdraw`
+- 100 Tgas for `sync_reserves`
+- 60–100 Tgas for `claim_owed` and `withdraw_deposit`
+
+A function call may attach up to 1000 Tgas and a transaction up to 1 PGas, so the
+`300 Tgas` that `scripts/deploy.sh` passes to `new` is a near-cli-rs value inside
+that envelope, not a protocol ceiling. `scripts/demo.js` and `scripts/measure.js`
+attach the budgets above, and `measure.js` refuses to report a path that reverted
+or that burnt more gas than it attached.
 
 ## Where it does not help
 

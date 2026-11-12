@@ -7,8 +7,8 @@
 // DEMO_ACCOUNT and KRATER_PRIVATE_KEY must all be set and the contracts must
 // already be deployed and initialised (scripts/deploy.sh does that).
 //
-// Build first: cargo near build. Override the wasm paths with POOL_WASM and
-// MOCK_FT_WASM.
+// Build first: cargo near build non-reproducible-wasm. Override the wasm paths
+// with POOL_WASM and MOCK_FT_WASM.
 
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -32,6 +32,15 @@ const MOCK_FT_WASM =
 const RPC_URL = process.env.RPC_URL;
 const GAS = (tgas) => teraToGas(String(tgas));
 
+// Client gas budgets in Tgas. The pool's reserve-sync chain is static gas
+// (callbacks 90/80/70/60, 25 to fill, 45 to settle), so each attachment funds
+// the whole chain it starts; one function call may attach up to 1000 Tgas.
+const GAS_CREDIT = 200; // ft_transfer_call: credit a deposit, or swap
+const GAS_ADD_LIQUIDITY = 300;
+const GAS_WITHDRAW = 300;
+const GAS_SYNC = 100;
+const GAS_PAYOUT = 100; // claim_owed, withdraw_deposit: 10 Tgas transfer + 8 Tgas callback
+
 function requireEnv(name) {
   const value = process.env[name];
   if (!value) {
@@ -45,24 +54,49 @@ function requireEnv(name) {
 async function readWasm(path) {
   if (!existsSync(path)) {
     throw new Error(
-      `missing wasm at ${path}; run "cargo near build" first, or set POOL_WASM/MOCK_FT_WASM`,
+      `missing wasm at ${path}; run "cargo near build non-reproducible-wasm" ` +
+        "first, or set POOL_WASM/MOCK_FT_WASM",
     );
   }
   return new Uint8Array(await readFile(path));
 }
 
+// The raw outcome carries the gas and the logs, and FINAL waits for the
+// callbacks, which is where the pool emits Swap and finishes its sync chain.
 function call(account, contractId, methodName, args, { gas = 60, deposit = "0" } = {}) {
-  return account.callFunction({
+  return account.callFunctionRaw({
     contractId,
     methodName,
     args,
     gas: GAS(gas),
     deposit,
+    waitUntil: "FINAL",
   });
 }
 
 function view(provider, contractId, method, args = {}) {
   return provider.callFunction({ contractId, method, args });
+}
+
+function logsOf(outcome) {
+  const logs = [...(outcome.transaction_outcome?.outcome?.logs ?? [])];
+  for (const receipt of outcome.receipts_outcome ?? []) {
+    logs.push(...(receipt.outcome?.logs ?? []));
+  }
+  return logs;
+}
+
+function kraterEvents(outcome) {
+  return logsOf(outcome)
+    .filter((line) => line.startsWith("EVENT_JSON:"))
+    .map((line) => JSON.parse(line.slice("EVENT_JSON:".length)))
+    .filter((event) => event.standard === "krater");
+}
+
+function assert(condition, message) {
+  if (!condition) {
+    throw new Error(message);
+  }
 }
 
 function toYocto(near) {
@@ -146,7 +180,6 @@ async function bootSandbox() {
     rebasingId,
     taxedId,
     alice,
-    deployer: root,
   };
 }
 
@@ -167,12 +200,12 @@ async function attachRpc() {
     );
   }
 
-  return { mode: "rpc", sandbox: null, provider, poolId, rebasingId, taxedId, alice, deployer: alice };
+  return { mode: "rpc", sandbox: null, provider, poolId, rebasingId, taxedId, alice };
 }
 
 async function main() {
   const chain = RPC_URL ? await attachRpc() : await bootSandbox();
-  const { provider, poolId, rebasingId, taxedId, alice, deployer } = chain;
+  const { provider, poolId, rebasingId, taxedId, alice } = chain;
 
   try {
     // Registration first: receiving a NEP-141 balance or a share requires a
@@ -199,7 +232,7 @@ async function main() {
         tokenId,
         "ft_transfer_call",
         { receiver_id: poolId, amount: TOKEN_SCALE.toString(), msg: "" },
-        { gas: 200, deposit: "1" },
+        { gas: GAS_CREDIT, deposit: "1" },
       );
     }
 
@@ -213,7 +246,7 @@ async function main() {
       poolId,
       "add_liquidity",
       { amounts: credits, min_shares: "1" },
-      { gas: 300, deposit: "1" },
+      { gas: GAS_ADD_LIQUIDITY, deposit: "1" },
     );
 
     const reservesAfterAdd = await view(provider, poolId, "get_reserves");
@@ -223,7 +256,7 @@ async function main() {
     });
 
     // Swap: the pool syncs fresh balances, then fills.
-    await call(
+    const swapOutcome = await call(
       alice,
       taxedId,
       "ft_transfer_call",
@@ -232,7 +265,7 @@ async function main() {
         amount: SWAP_IN.toString(),
         msg: JSON.stringify({ Swap: { min_out: "0" } }),
       },
-      { gas: 200, deposit: "1" },
+      { gas: GAS_CREDIT, deposit: "1" },
     );
 
     const reservesAfterSwap = await view(provider, poolId, "get_reserves");
@@ -240,7 +273,7 @@ async function main() {
     // Rebase the input reserve up by ten percent and sync. Views are cache-based,
     // so the quote moves only after the sync.
     await call(alice, rebasingId, "rebase", { factor_bps: 11_000 }, { gas: 30 });
-    await call(alice, poolId, "sync_reserves", {}, { gas: 100 });
+    await call(alice, poolId, "sync_reserves", {}, { gas: GAS_SYNC });
     const reservesAfterRebase = await view(provider, poolId, "get_reserves");
     const quoteAfter = await view(provider, poolId, "get_quote", {
       token_in: taxedId,
@@ -256,7 +289,7 @@ async function main() {
       throw new Error("no LP shares to withdraw; add_liquidity did not mint any");
     }
     await call(alice, poolId, "withdraw", { shares: withdrawShares.toString() }, {
-      gas: 150,
+      gas: GAS_WITHDRAW,
       deposit: "1",
     });
 
@@ -268,7 +301,7 @@ async function main() {
     for (const [index, amount] of backlog.entries()) {
       if (BigInt(amount) > 0n) {
         await call(alice, poolId, "claim_owed", { token: tokens[index] }, {
-          gas: 60,
+          gas: GAS_PAYOUT,
           deposit: "1",
         });
       }
@@ -283,42 +316,43 @@ async function main() {
           poolId,
           "withdraw_deposit",
           { token: tokens[index], amount },
-          { gas: 60, deposit: "1" },
+          { gas: GAS_PAYOUT, deposit: "1" },
         );
       }
     }
 
-    const quoteDeltaBps =
-      quoteBefore === "0"
-        ? null
-        : ((BigInt(quoteAfter) - BigInt(quoteBefore)) * 10_000n) / BigInt(quoteBefore);
-    const report = {
-      mode: chain.mode,
-      pool: poolId,
-      tokens: { a: rebasingId, b: taxedId },
-      account: alice.accountId,
-      reserves: {
-        afterAdd: reservesAfterAdd,
-        afterSwap: reservesAfterSwap,
-        afterRebase: reservesAfterRebase,
-      },
-      quote: {
-        before: quoteBefore,
-        afterRebase: quoteAfter,
-        deltaBps: quoteDeltaBps === null ? null : quoteDeltaBps.toString(),
-        deltaPercent:
-          quoteDeltaBps === null ? null : (Number(quoteDeltaBps) / 100).toFixed(2),
-      },
-      shares,
-      withdrawnShares: withdrawShares.toString(),
-      finalBalances: {
-        rebasing: await view(provider, rebasingId, "ft_balance_of", { account_id: alice.accountId }),
-        taxed: await view(provider, taxedId, "ft_balance_of", { account_id: alice.accountId }),
-      },
-      deployer: deployer.accountId,
+    assert(
+      BigInt(quoteBefore) > 0n,
+      "the quote before the rebase is zero; add_liquidity left the reserves empty",
+    );
+    const deltaBps = ((BigInt(quoteAfter) - BigInt(quoteBefore)) * 10_000n) / BigInt(quoteBefore);
+
+    // The demo only counts if value moved: shares were minted, the swap changed
+    // a cached reserve, and the pool emitted its own Swap event.
+    const swapEvents = kraterEvents(swapOutcome).filter((event) => event.event === "Swap");
+    assert(shares > 0n, `add_liquidity minted no LP shares to ${alice.accountId}`);
+    assert(
+      BigInt(reservesAfterSwap[0]) !== BigInt(reservesAfterAdd[0]) ||
+        BigInt(reservesAfterSwap[1]) !== BigInt(reservesAfterAdd[1]),
+      `the swap left both reserves unchanged at ${reservesAfterAdd.join(" / ")}`,
+    );
+    assert(swapEvents.length > 0, `no krater Swap event in the swap outcome from ${poolId}`);
+
+    const finalBalances = {
+      rebasing: await view(provider, rebasingId, "ft_balance_of", { account_id: alice.accountId }),
+      taxed: await view(provider, taxedId, "ft_balance_of", { account_id: alice.accountId }),
     };
 
-    console.log(JSON.stringify(report, null, 2));
+    console.log(`krater demo ok (${chain.mode}): ${poolId}`);
+    console.log(`  reserves   after add   ${reservesAfterAdd.join(" / ")}`);
+    console.log(`             after swap  ${reservesAfterSwap.join(" / ")}`);
+    console.log(`             after +10%  ${reservesAfterRebase.join(" / ")}`);
+    console.log(`  shares     ${shares} minted, ${withdrawShares} burned`);
+    console.log(
+      `  quote      ${SWAP_IN} taxed -> ${quoteBefore} then ${quoteAfter} rebasing (${deltaBps} bps)`,
+    );
+    console.log(`  swap       ${swapEvents.length} krater Swap event(s)`);
+    console.log(`  alice      ${finalBalances.rebasing} rebasing, ${finalBalances.taxed} taxed`);
   } finally {
     if (chain.sandbox) {
       await chain.sandbox.stop();

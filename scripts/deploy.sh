@@ -17,10 +17,20 @@
 #   SHARE_SYMBOL     (K-LP)
 #   FUND_AMOUNT      (10 NEAR)  per created subaccount
 #   STORAGE_DEPOSIT  (0.01 NEAR) per NEP-145 registration
-#   INIT_GAS         (300 Tgas)
+#   INIT_GAS         (300 Tgas, near-cli prepaid gas for each `new` call)
 #
-# The reproducible-build metadata in contracts/pool/Cargo.toml pins the build image;
-# `cargo near build` here is the local, non-reproducible build used for deploy.
+# Gas: INIT_GAS (300 Tgas) is a near-cli-rs prepaid-gas value, not a protocol
+# ceiling. A function call may attach up to 1000 Tgas and a transaction up to
+# 1 PGas; every prepaid-gas value below stays inside that envelope, and the pool's
+# static chain (callbacks 90/80/70/60 Tgas, 25 to fill, 45 to settle) is budgeted
+# from the gas the caller attaches.
+#
+# Build: `cargo near build non-reproducible-wasm` and
+# `cargo near deploy build-non-reproducible-wasm` produce and ship the local wasm.
+# The default reproducible variants run Docker against committed source (their
+# deploy variant also needs it pushed), so they are not part of this script: a
+# reproducible deployment is W4 work and uses the image pinned in
+# contracts/pool/Cargo.toml.
 # Re-running against an already-initialised pool fails at the init call on purpose:
 # `new` runs once.
 
@@ -44,6 +54,14 @@ case "$SWAP_FEE_BPS" in
     exit 1
     ;;
 esac
+
+# 300 Tgas is a near-cli-rs value, not a ceiling: a call may attach up to 1000
+# Tgas, so anything larger than that is a mistake rather than a bigger budget.
+init_tgas="${INIT_GAS%%[!0-9]*}"
+if [ -z "$init_tgas" ] || [ "$init_tgas" -lt 1 ] || [ "$init_tgas" -gt 1000 ]; then
+  printf 'error: INIT_GAS must be 1..1000 Tgas, not %s\n' "$INIT_GAS" >&2
+  exit 1
+fi
 
 WORK_DIR="$(mktemp -d)"
 cleanup() { rm -rf "$WORK_DIR"; }
@@ -87,13 +105,17 @@ create_subaccount() {
 }
 
 build_crate() {
-  ( cd "$1" && cargo near build )
+  ( cd "$1" && cargo near build non-reproducible-wasm )
 }
 
+# Deploy the wasm built above. `cargo near deploy` requires one build variant, and
+# the reproducible one needs Docker plus a pushed tree, so the local build is the
+# variant here; W4 adds the pinned-image deployment. Init stays a separate
+# near-cli-rs call so its gas and zero deposit are explicit.
 deploy_contract() {
   local account_id="$1" crate_dir="$2"
-  ( cd "$crate_dir" && cargo near deploy "$account_id" without-init-call \
-      network-config "$NEAR_NETWORK" sign-with-keychain send )
+  ( cd "$crate_dir" && cargo near deploy build-non-reproducible-wasm "$account_id" \
+      without-init-call network-config "$NEAR_NETWORK" sign-with-keychain send )
 }
 
 call_function() {
@@ -141,15 +163,18 @@ lock_pool_account() {
 }
 
 printf 'network %s, pool %s\n' "$NEAR_NETWORK" "$KRATER_ACCOUNT"
+
+# Build before touching the network: a compile failure must not come after
+# account creation and faucet funding.
+build_crate contracts/pool
+build_crate contracts/mock-ft
+
 create_pool_account
 create_subaccount "$REBASING_ACCOUNT"
 create_subaccount "$TAXED_ACCOUNT"
 for demo in $DEMO_ACCOUNTS; do
   create_subaccount "$demo"
 done
-
-build_crate contracts/pool
-build_crate contracts/mock-ft
 
 deploy_contract "$KRATER_ACCOUNT" contracts/pool
 deploy_contract "$REBASING_ACCOUNT" contracts/mock-ft
