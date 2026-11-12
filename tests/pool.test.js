@@ -15,22 +15,22 @@
 // MOCK_FT_WASM. Run with: node --test tests/pool.test.js
 
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { after, before, describe, test } from "node:test";
-import {
-  Account,
-  JsonRpcProvider,
-  KeyPair,
-  actions,
-  nearToYocto,
-  teraToGas,
-} from "near-api-js";
+import { Account, JsonRpcProvider, actions } from "near-api-js";
 import { Sandbox } from "near-kit/sandbox";
-
-const POOL_WASM = process.env.POOL_WASM ?? "target/near/krater_pool/krater_pool.wasm";
-const MOCK_FT_WASM =
-  process.env.MOCK_FT_WASM ?? "target/near/krater_mock_ft/krater_mock_ft.wasm";
+import {
+  call,
+  callRaw,
+  createAccount as createHarnessAccount,
+  deploy,
+  logsOf,
+  readWasm,
+  view as harnessView,
+  GAS,
+  POOL_WASM,
+  MOCK_FT_WASM,
+} from "../scripts/lib/harness.js";
 const SPEC_URI = "https://raw.githubusercontent.com/nirholas/near-krater/main/manifest.json";
 const TAGS = ["curve", "rebasing", "fee-on-transfer", "custom-curve", "no-admin"];
 const E18 = 10n ** 18n;
@@ -66,64 +66,19 @@ let daveId;
 // envelope test at the end asserts the full NEP-297 shape for each variant.
 const seenEvents = new Map();
 
-const GAS = (tgas) => teraToGas(String(tgas));
 
-async function readWasm(path) {
-  assert.ok(existsSync(path), `missing wasm at ${path}; run "cargo near build" first`);
-  return new Uint8Array(await readFile(path));
-}
-
-function call(account, contractId, methodName, args, { gas = 60, deposit = "0" } = {}) {
-  return account.callFunction({
-    contractId,
-    methodName,
-    args,
-    gas: GAS(gas),
-    deposit,
-    waitUntil: "FINAL",
-  });
-}
 
 function view(contractId, method, args = {}) {
-  return provider.callFunction({ contractId, method, args }).catch((error) => {
+  return harnessView(provider, contractId, method, args).catch((error) => {
     throw new Error(`view ${contractId}.${method} ${JSON.stringify(args)}: ${error.message}`);
   });
 }
 
-function toYocto(near) {
-  return nearToYocto(String(near).trim().replace(/\s*NEAR$/i, ""));
+function createAccount(root, accountId, nearAmount) {
+  return createHarnessAccount(provider, root, accountId, nearAmount);
 }
 
-async function createAccount(root, accountId, nearAmount) {
-  const keyPair = KeyPair.fromRandom("ED25519");
-  await root.signAndSendTransaction({
-    receiverId: accountId,
-    actions: [
-      actions.createAccount(),
-      actions.transfer(toYocto(nearAmount)),
-      actions.addFullAccessKey(keyPair.getPublicKey()),
-    ],
-  });
-  return new Account(accountId, provider, keyPair.toString());
-}
 
-async function deploy(account, contractId, wasm) {
-  await account.signAndSendTransaction({
-    receiverId: contractId,
-    actions: [actions.deployContract(wasm)],
-  });
-}
-
-function callRaw(account, contractId, methodName, args, { gas = 60, deposit = "0" } = {}) {
-  return account.callFunctionRaw({
-    contractId,
-    methodName,
-    args,
-    gas: GAS(gas),
-    deposit,
-    waitUntil: "FINAL",
-  });
-}
 
 // A flow may end with a token leg the pool handles in a callback. The outer
 // call succeeds and the failed leg is expected, so keep the final status
@@ -143,14 +98,6 @@ function callExpectingFailedLeg(
   });
 }
 
-function logsOf(outcome) {
-  const logs = [];
-  for (const receipt of outcome.receipts_outcome ?? []) {
-    logs.push(...(receipt.outcome.logs ?? []));
-  }
-  logs.push(...(outcome.transaction_outcome?.outcome?.logs ?? []));
-  return logs;
-}
 
 function eventsOf(outcome) {
   const events = logsOf(outcome)

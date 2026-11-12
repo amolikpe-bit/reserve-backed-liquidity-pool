@@ -17,7 +17,7 @@
   "scripts": {
     "demo": "node scripts/demo.js",
     "measure": "node scripts/measure.js",
-    "test": "node --test tests/pool.test.js"
+    "test": "node --test --test-concurrency=1 tests/pool.test.js"
   },
   "dependencies": {
     "near-api-js": "7.5.3",

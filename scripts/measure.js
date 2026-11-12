@@ -19,201 +19,26 @@
 // with POOL_WASM and MOCK_FT_WASM. The measured values replace estimates; nothing
 // here is asserted in advance.
 
-import { existsSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import {
-  Account,
-  JsonRpcProvider,
-  KeyPair,
-  actions,
-  nearToYocto,
-  teraToGas,
-} from "near-api-js";
-import { Sandbox } from "near-kit/sandbox";
+  attachRpc,
+  bootSandbox,
+  callRaw as call,
+  kraterEvents,
+  register,
+  view,
+  GAS_ADD_LIQUIDITY,
+  GAS_CREDIT,
+  GAS_PAYOUT,
+  GAS_SYNC,
+  GAS_WITHDRAW,
+  ONE,
+  RPC_URL,
+  TOKEN_SCALE,
+} from "./lib/harness.js";
 
-const ONE = 10n ** 18n;
 const TEN = 10n * ONE;
-const TOKEN_SCALE = 1_000n * ONE;
 
-const POOL_WASM = process.env.POOL_WASM ?? "target/near/krater_pool/krater_pool.wasm";
-const MOCK_FT_WASM =
-  process.env.MOCK_FT_WASM ?? "target/near/krater_mock_ft/krater_mock_ft.wasm";
-const RPC_URL = process.env.RPC_URL;
-const GAS = (tgas) => teraToGas(String(tgas));
-
-// Client gas budgets in Tgas. The pool's reserve-sync chain is static gas
-// (callbacks 90/80/70/60, 25 to fill, 45 to settle), so each attachment funds
-// the whole chain it starts; one function call may attach up to 1000 Tgas.
-const GAS_CREDIT = 200; // ft_transfer_call: credit a deposit, or swap
-const GAS_ADD_LIQUIDITY = 300;
-const GAS_WITHDRAW = 300;
-const GAS_SYNC = 100;
-const GAS_PAYOUT = 100; // claim_owed, withdraw_deposit: 10 Tgas transfer + 8 Tgas callback
-
-function requireEnv(name) {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(
-      `${name} is required when RPC_URL is set; unset RPC_URL to measure in a sandbox instead`,
-    );
-  }
-  return value;
-}
-
-async function readWasm(path) {
-  if (!existsSync(path)) {
-    throw new Error(
-      `missing wasm at ${path}; run "cargo near build non-reproducible-wasm" ` +
-        "first, or set POOL_WASM/MOCK_FT_WASM",
-    );
-  }
-  return new Uint8Array(await readFile(path));
-}
-
-// Gas accounting needs the raw execution outcome, not the decoded return value,
-// and FINAL waits for the callback tree the gas is charged across.
-function call(account, contractId, methodName, args, { gas = 60, deposit = "0" } = {}) {
-  return account.callFunctionRaw({
-    contractId,
-    methodName,
-    args,
-    gas: GAS(gas),
-    deposit,
-    waitUntil: "FINAL",
-  });
-}
-
-function view(provider, contractId, method, args = {}) {
-  return provider.callFunction({ contractId, method, args });
-}
-
-function toYocto(near) {
-  return nearToYocto(String(near).trim().replace(/\s*NEAR$/i, ""));
-}
-
-async function createAccount(provider, payer, accountId, nearAmount) {
-  const keyPair = KeyPair.fromRandom("ED25519");
-  await payer.signAndSendTransaction({
-    receiverId: accountId,
-    actions: [
-      actions.createAccount(),
-      actions.transfer(toYocto(nearAmount)),
-      actions.addFullAccessKey(keyPair.getPublicKey()),
-    ],
-  });
-  return new Account(accountId, provider, keyPair.toString());
-}
-
-async function deploy(account, contractId, wasm) {
-  await account.signAndSendTransaction({
-    receiverId: contractId,
-    actions: [actions.deployContract(wasm)],
-  });
-}
-
-async function register(payer, contractId, accountId) {
-  await call(
-    payer,
-    contractId,
-    "storage_deposit",
-    { account_id: accountId },
-    { gas: 30, deposit: nearToYocto("0.02") },
-  );
-}
-
-async function bootSandbox() {
-  const sandbox = await Sandbox.start();
-  const provider = new JsonRpcProvider({ url: sandbox.rpcUrl });
-  const root = new Account(sandbox.rootAccount.id, provider, sandbox.rootAccount.secretKey);
-  const suffix = sandbox.rootAccount.id;
-
-  const [poolWasm, mockWasm] = await Promise.all([readWasm(POOL_WASM), readWasm(MOCK_FT_WASM)]);
-
-  const poolId = `pool.${suffix}`;
-  const rebasingId = `rebasing.${suffix}`;
-  const taxedId = `taxed.${suffix}`;
-  const aliceId = `alice.${suffix}`;
-  const carolId = `carol.${suffix}`;
-
-  const pool = await createAccount(provider, root, poolId, "20 NEAR");
-  const rebasing = await createAccount(provider, root, rebasingId, "20 NEAR");
-  const taxed = await createAccount(provider, root, taxedId, "20 NEAR");
-  const alice = await createAccount(provider, root, aliceId, "20 NEAR");
-  const carol = await createAccount(provider, root, carolId, "20 NEAR");
-
-  await deploy(pool, poolId, poolWasm);
-  await deploy(rebasing, rebasingId, mockWasm);
-  await deploy(taxed, taxedId, mockWasm);
-
-  await call(pool, poolId, "new", {
-    token_a: rebasingId,
-    token_b: taxedId,
-    swap_fee_bps: 30,
-    share_name: "Krater Bench LP",
-    share_symbol: "K-LP-bench",
-  }, { gas: 100 });
-  await call(rebasing, rebasingId, "new", {
-    name: "Krater Rebasing Fixture",
-    symbol: "kREB",
-  }, { gas: 30 });
-  await call(taxed, taxedId, "new", {
-    name: "Krater Taxed Fixture",
-    symbol: "kTAX",
-  }, { gas: 30 });
-
-  return {
-    mode: "sandbox",
-    network: "sandbox",
-    sandbox,
-    provider,
-    poolId,
-    rebasingId,
-    taxedId,
-    alice,
-    carol,
-    pool,
-    payer: root,
-  };
-}
-
-async function attachRpc() {
-  const provider = new JsonRpcProvider({ url: RPC_URL });
-  const poolId = requireEnv("KRATER_CONTRACT");
-  const rebasingId = requireEnv("REBASING_ACCOUNT");
-  const taxedId = requireEnv("TAXED_ACCOUNT");
-  const alice = new Account(
-    requireEnv("DEMO_ACCOUNT"),
-    provider,
-    requireEnv("KRATER_PRIVATE_KEY"),
-  );
-  const carol = new Account(
-    requireEnv("CAROL_ACCOUNT"),
-    provider,
-    requireEnv("CAROL_PRIVATE_KEY"),
-  );
-
-  try {
-    await view(provider, poolId, "pool_name");
-  } catch (error) {
-    throw new Error(
-      `no krater pool answered at ${poolId}; deploy it with scripts/deploy.sh first`,
-      { cause: error },
-    );
-  }
-
-  return {
-    mode: "rpc",
-    network: RPC_URL,
-    sandbox: null,
-    provider,
-    poolId,
-    rebasingId,
-    taxedId,
-    alice,
-    carol,
-    payer: alice,
-  };
-}
 
 function gasBurnt(outcome) {
   if (!outcome || !outcome.transaction_outcome || !outcome.transaction_outcome.outcome) {
@@ -230,20 +55,6 @@ function gasBurnt(outcome) {
 
 const toTgas = (yocto) => Number(yocto) / 1e12;
 
-function logsOf(outcome) {
-  const logs = [...(outcome.transaction_outcome?.outcome?.logs ?? [])];
-  for (const receipt of outcome.receipts_outcome ?? []) {
-    logs.push(...(receipt.outcome?.logs ?? []));
-  }
-  return logs;
-}
-
-function kraterEvents(outcome) {
-  return logsOf(outcome)
-    .filter((line) => line.startsWith("EVENT_JSON:"))
-    .map((line) => JSON.parse(line.slice("EVENT_JSON:".length)))
-    .filter((event) => event.standard === "krater");
-}
 
 // Measure one path, refusing to report a number for a run that reverted or that
 // burnt more than the client attached to it.
@@ -270,7 +81,13 @@ async function balances(provider, tokenIds, accountId) {
 }
 
 async function main() {
-  const chain = RPC_URL ? await attachRpc() : await bootSandbox();
+  const chain = RPC_URL
+    ? await attachRpc({ requireCarol: true })
+    : await bootSandbox({
+        shareName: "Krater Bench LP",
+        shareSymbol: "K-LP-bench",
+        withCarol: true,
+      });
   const { provider, poolId, rebasingId, taxedId, alice, carol, payer, pool } = chain;
 
   try {

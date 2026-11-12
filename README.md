@@ -190,6 +190,7 @@ index and the mutators, so a test can read the same numbers the pool reads.
 | `scripts/deploy.sh` | account setup, deploy, init, registration, key deletion |
 | `scripts/demo.js` | sandbox or live end-to-end run |
 | `scripts/measure.js` | gas and rebase-delta measurement, writes `bench.json` |
+| `scripts/lib/harness.js` | shared sandbox/RPC client used by demo, measure and tests |
 | `tests/pool.test.js` | sandbox tests for the deployed surface |
 | `manifest.json` | machine-readable pool description |
 

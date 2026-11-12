@@ -55,7 +55,7 @@ pub(crate) fn narrow(value: U256) -> u128 {
 ///
 /// Total, not partial: an empty reserve side and a zero input have no price and
 /// quote zero, which is what lets `fill_swap` turn "no price yet" into a refund
-/// instead of a panic. `quote_from` layers the view's documented `NoReserves`
+/// instead of a panic. `get_quote` layers the view's documented `NoReserves`
 /// panic on top.
 pub(crate) fn quote_from_with_fee(
     r_in: u128,
@@ -74,23 +74,6 @@ pub(crate) fn quote_from_with_fee(
     narrow(numerator / denominator)
 }
 
-impl Contract {
-    /// Quote an exact-input swap against the supplied reserves.
-    ///
-    /// The reserve check comes first: a pool with an empty side has no price, even
-    /// for a zero input. After that, a zero input quotes zero.
-    ///
-    /// # Panics
-    /// - `NoReserves` if either reserve is zero.
-    /// - `MathOverflow` if the result does not fit in `u128`.
-    pub(crate) fn quote_from(&self, r_in: u128, r_out: u128, amount_in: u128) -> u128 {
-        if r_in == 0 || r_out == 0 {
-            env::panic_str("NoReserves");
-        }
-        quote_from_with_fee(r_in, r_out, amount_in, self.swap_fee_bps)
-    }
-}
-
 #[near]
 impl Contract {
     /// Cached tradeable reserves, as `(reserve_a, reserve_b)`.
@@ -99,7 +82,7 @@ impl Contract {
     /// quotes, so a rebase is not priced until one of those runs. Call
     /// `sync_reserves` first when the value must be current.
     pub fn get_reserves(&self) -> (U128, U128) {
-        (U128(self.reserve_a), U128(self.reserve_b))
+        (U128(self.sides[0].reserve), U128(self.sides[1].reserve))
     }
 
     /// Quote the output of an exact-input swap of `amount_in` of `token_in`.
@@ -108,15 +91,18 @@ impl Contract {
     /// - `UnknownToken` if `token_in` is not one of the two pair tokens.
     /// - `NoReserves` if either cached reserve is zero.
     pub fn get_quote(&self, token_in: AccountId, amount_in: U128) -> U128 {
-        let (r_in, r_out) = if token_in == self.token_a {
-            (self.reserve_a, self.reserve_b)
-        } else if token_in == self.token_b {
-            (self.reserve_b, self.reserve_a)
-        } else {
-            env::panic_str("UnknownToken")
-        };
+        let r_in = self.reserve_of(&token_in);
+        let r_out = self.reserve_of(&self.other_token(&token_in));
+        if r_in == 0 || r_out == 0 {
+            env::panic_str("NoReserves");
+        }
 
-        U128(self.quote_from(r_in, r_out, amount_in.0))
+        U128(quote_from_with_fee(
+            r_in,
+            r_out,
+            amount_in.0,
+            self.swap_fee_bps,
+        ))
     }
 }
 
@@ -141,7 +127,7 @@ impl Contract {
         #[callback_result(max_bytes = 128)] r: Result<U128, PromiseError>,
         allow_fill: bool,
     ) -> Promise {
-        self.index_a = resolve_index(r, "token_a index");
+        self.sides[0].index = resolve_index(r, "token_a index");
         self.balance_hop_a(allow_fill)
     }
 
@@ -152,7 +138,7 @@ impl Contract {
         #[callback_result(max_bytes = 128)] r: Result<U128, PromiseError>,
         allow_fill: bool,
     ) -> Promise {
-        self.index_b = resolve_index(r, "token_b index");
+        self.sides[1].index = resolve_index(r, "token_b index");
         self.balance_hop_b(allow_fill)
     }
 
@@ -170,9 +156,10 @@ impl Contract {
     ) -> PromiseOrValue<U128> {
         match r {
             Ok(balance) => {
-                self.reserve_a = balance.0.saturating_sub(shares::credit_nominal(
-                    self.total_credit_shares_a,
-                    self.index_a,
+                let side = &mut self.sides[0];
+                side.reserve = balance.0.saturating_sub(shares::credit_nominal(
+                    side.credit_shares,
+                    side.index,
                 ));
                 PromiseOrValue::Promise(self.index_hop_b(allow_fill))
             }
@@ -200,15 +187,16 @@ impl Contract {
     ) -> U128 {
         match r {
             Ok(balance) => {
-                self.reserve_b = balance.0.saturating_sub(shares::credit_nominal(
-                    self.total_credit_shares_b,
-                    self.index_b,
+                let side = &mut self.sides[1];
+                side.reserve = balance.0.saturating_sub(shares::credit_nominal(
+                    side.credit_shares,
+                    side.index,
                 ));
                 PoolEvent::ReservesSynced {
-                    reserve_a: U128(self.reserve_a),
-                    reserve_b: U128(self.reserve_b),
-                    index_a: U128(self.index_a),
-                    index_b: U128(self.index_b),
+                    reserve_a: U128(self.sides[0].reserve),
+                    reserve_b: U128(self.sides[1].reserve),
+                    index_a: U128(self.sides[0].index),
+                    index_b: U128(self.sides[1].index),
                 }
                 .emit();
 

@@ -104,14 +104,9 @@ create_subaccount() {
     network-config "$NEAR_NETWORK" sign-with-keychain send
 }
 
-build_crate() {
-  ( cd "$1" && cargo near build non-reproducible-wasm )
-}
-
-# Deploy the wasm built above. `cargo near deploy` requires one build variant, and
-# the reproducible one needs Docker plus a pushed tree, so the local build is the
-# variant here; W4 adds the pinned-image deployment. Init stays a separate
-# near-cli-rs call so its gas and zero deposit are explicit.
+# `cargo near deploy` builds the local variant itself. The reproducible variant
+# needs Docker plus a pushed tree, so it is not part of this script; init stays a
+# separate near-cli-rs call so its gas and zero deposit are explicit.
 deploy_contract() {
   local account_id="$1" crate_dir="$2"
   ( cd "$crate_dir" && cargo near deploy build-non-reproducible-wasm "$account_id" \
@@ -164,10 +159,7 @@ lock_pool_account() {
 
 printf 'network %s, pool %s\n' "$NEAR_NETWORK" "$KRATER_ACCOUNT"
 
-# Build before touching the network: a compile failure must not come after
-# account creation and faucet funding.
-build_crate contracts/pool
-build_crate contracts/mock-ft
+
 
 create_pool_account
 create_subaccount "$REBASING_ACCOUNT"

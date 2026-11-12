@@ -15,4 +15,3 @@ crate-type = ["cdylib", "rlib"]
 near-sdk = { workspace = true }
 near-contract-standards = { workspace = true }
 primitive-types = { workspace = true }
-serde = { workspace = true }

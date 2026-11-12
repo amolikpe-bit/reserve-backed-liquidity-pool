@@ -22,7 +22,8 @@
 
 use near_sdk::json_types::U128;
 use near_sdk::{
-    assert_one_yocto, env, near, serde_json, AccountId, Promise, PromiseError, PromiseOrValue,
+    assert_one_yocto, env, near, require, serde_json, AccountId, Promise, PromiseError,
+    PromiseOrValue,
 };
 
 use crate::events::PoolEvent;
@@ -44,16 +45,6 @@ pub enum PoolMsg {
     Deposit {},
 }
 
-/// Parse an `ft_transfer_call` message. An empty message means `Deposit`.
-///
-/// Returns `None` for a malformed or unknown message; the receiver refunds the
-/// transfer in that case.
-pub fn parse_msg(msg: &str) -> Option<PoolMsg> {
-    if msg.trim().is_empty() {
-        return Some(PoolMsg::Deposit {});
-    }
-    serde_json::from_str(msg).ok()
-}
 
 /// NEP-148 metadata, reduced to the one field the deposit floor needs.
 ///
@@ -105,7 +96,12 @@ impl Contract {
             return PromiseOrValue::Value(amount);
         }
 
-        let Some(message) = parse_msg(&msg) else {
+        let message = if msg.trim().is_empty() {
+            Some(PoolMsg::Deposit {})
+        } else {
+            serde_json::from_str(&msg).ok()
+        };
+        let Some(message) = message else {
             env::log_str("refunded a transfer with an unknown message");
             return PromiseOrValue::Value(amount);
         };
@@ -218,12 +214,8 @@ impl Contract {
     #[payable]
     pub fn withdraw_deposit(&mut self, token: AccountId, amount: U128) -> Promise {
         assert_one_yocto();
-        if !self.is_pair_token(&token) {
-            env::panic_str("UnknownToken");
-        }
-        if amount.0 == 0 {
-            env::panic_str("AmountTooSmall");
-        }
+        require!(self.is_pair_token(&token), "UnknownToken");
+        require!(amount.0 != 0, "AmountTooSmall");
         let who = env::predecessor_account_id();
 
         crate::ext_ft::ext(token.clone())
@@ -251,9 +243,10 @@ impl Contract {
     ) -> Promise {
         let index = resolve_index(r, "withdraw token index");
         let needed = shares::credit_shares_ceil(amount.0, index);
-        if needed > self.credit_of(&who, &token) {
-            env::panic_str("InsufficientDeposit");
-        }
+        require!(
+            needed <= self.credit_of(&who, &token),
+            "InsufficientDeposit"
+        );
         self.sub_credit(&who, &token, needed);
         PoolEvent::CreditWithdrawn {
             account_id: who.clone(),

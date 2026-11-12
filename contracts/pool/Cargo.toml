@@ -14,9 +14,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 near-sdk = { workspace = true }
 near-sdk-contract-tools = { workspace = true }
-near-contract-standards = { workspace = true }
 primitive-types = { workspace = true }
-serde = { workspace = true }
 
 [dev-dependencies]
 near-sdk = { workspace = true, features = ["unit-testing"] }

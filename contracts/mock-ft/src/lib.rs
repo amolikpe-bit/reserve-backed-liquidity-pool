@@ -67,7 +67,6 @@ pub struct Contract {
     token: FungibleToken,
     name: String,
     symbol: String,
-    decimals: u8,
     index: u128,
     fee_bps: u32,
 }
@@ -189,7 +188,6 @@ impl Contract {
             token: FungibleToken::new(b"ft".to_vec()),
             name,
             symbol,
-            decimals: DECIMALS,
             index: ONE,
             fee_bps: 0,
         }
@@ -202,7 +200,6 @@ impl Contract {
             self.index,
         ))
     }
-
     /// NEP-141 total supply, scaled by the current index.
     pub fn ft_total_supply(&self) -> U128 {
         U128(nominal(self.token.total_supply, self.index))
@@ -217,7 +214,7 @@ impl Contract {
             icon: None,
             reference: None,
             reference_hash: None,
-            decimals: self.decimals,
+            decimals: DECIMALS,
         }
     }
 
@@ -229,10 +226,6 @@ impl Contract {
         U128(self.index)
     }
 
-    /// Current transfer fee in basis points.
-    pub fn fee_bps(&self) -> u32 {
-        self.fee_bps
-    }
 
     /// Move the index by `factor_bps`. 10_000 leaves balances unchanged, 11_000
     /// adds ten percent, 5_000 halves them.
@@ -243,9 +236,7 @@ impl Contract {
     pub fn rebase(&mut self, factor_bps: u32) {
         let next =
             U256::from(self.index) * U256::from(factor_bps as u128) / U256::from(BPS);
-        if next == U256::from(0u128) {
-            env::panic_str("InvalidIndex");
-        }
+        require!(next != U256::zero(), "InvalidIndex");
         self.index = narrow(next);
     }
 
@@ -258,9 +249,7 @@ impl Contract {
     /// # Panics
     /// `InvalidFee` if `bps` is 10_000 or more.
     pub fn set_fee(&mut self, bps: u32) {
-        if bps >= BPS as u32 {
-            env::panic_str("InvalidFee");
-        }
+        require!(bps < BPS as u32, "InvalidFee");
         self.fee_bps = bps;
     }
 

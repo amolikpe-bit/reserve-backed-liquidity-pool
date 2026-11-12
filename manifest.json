@@ -20,8 +20,5 @@
     "mainnet"
   ],
   "source": "contracts/pool/src/lib.rs",
-  "docs": null,
-  "repo": "https://github.com/nirholas/near-krater",
-  "site": null,
-  "deployments": []
+  "repo": "https://github.com/nirholas/near-krater"
 }

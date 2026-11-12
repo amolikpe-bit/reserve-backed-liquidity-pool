@@ -31,8 +31,8 @@ mod unit_tests;
 use near_sdk::json_types::U128;
 use near_sdk::store::LookupMap;
 use near_sdk::{
-    assert_one_yocto, env, ext_contract, near, AccountId, Gas, NearToken, PanicOnDefault, Promise,
-    PromiseError,
+    assert_one_yocto, env, ext_contract, near, require, AccountId, Gas, NearToken, PanicOnDefault,
+    Promise, PromiseError,
 };
 use near_sdk_contract_tools::ft::{
     ContractMetadata, FungibleToken, Nep141Burn, Nep141Controller, Nep141Mint, Nep145Controller,
@@ -149,12 +149,27 @@ pub struct PendingWithdraw {
     pub shares: u128,
 }
 
+/// Mutable per-token state, stored in pair order (`[token_a, token_b]`).
+#[near(serializers = [borsh])]
+#[derive(Clone, Debug)]
+pub struct TokenSide {
+    /// Cached tradeable reserve: pool balance minus credited-but-not-added deposits.
+    pub reserve: u128,
+    /// Token index at the last sync (`ONE` = 1e18).
+    pub index: u128,
+    /// Credit shares held across all accounts for this token; never tradeable.
+    pub credit_shares: u128,
+    /// NEP-148 decimals, cached at the first deposit (floor = 10^(decimals-3)).
+    pub decimals: Option<u8>,
+}
+
 /// The pool's state.
 ///
-/// `reserve_a` / `reserve_b` are the cached tradeable reserves: the pool's
-/// NEP-141 balances minus the nominal value of all deposited-but-not-added
-/// credits. They are refreshed by the permissionless sync chain and by every
-/// swap, so views read the cache and settlement reads fresh balances.
+/// `sides` holds the cached tradeable reserves and the per-token accounting in
+/// pair order: the pool's NEP-141 balances minus the nominal value of all
+/// deposited-but-not-added credits. They are refreshed by the permissionless sync
+/// chain and by every swap, so views read the cache and settlement reads fresh
+/// balances.
 ///
 /// `deposits` and `owed` hold credit shares (nominal = shares * index / ONE) and
 /// failed payouts respectively, keyed by (account, token).
@@ -167,18 +182,8 @@ pub struct Contract {
     pub token_b: AccountId,
     /// Swap fee in basis points, taken from the input side; immutable after init.
     pub swap_fee_bps: u32,
-    /// Cached tradeable reserve of `token_a`.
-    pub reserve_a: u128,
-    /// Cached tradeable reserve of `token_b`.
-    pub reserve_b: u128,
-    /// Token index of `token_a` at the last sync (ONE = 1e18).
-    pub index_a: u128,
-    /// Token index of `token_b` at the last sync (ONE = 1e18).
-    pub index_b: u128,
-    /// Credit shares held for `token_a`, across all accounts. Never tradeable.
-    pub total_credit_shares_a: u128,
-    /// Credit shares held for `token_b`, across all accounts. Never tradeable.
-    pub total_credit_shares_b: u128,
+    /// Per-token state, in `[token_a, token_b]` order.
+    pub sides: [TokenSide; 2],
     /// (account, token) -> credit shares. Written by deposits, spent by `add_liquidity`.
     pub deposits: LookupMap<(AccountId, AccountId), u128>,
     /// (account, token) -> failed payout, claimable via `claim_owed`.
@@ -191,13 +196,6 @@ pub struct Contract {
     pub pending_withdraw: Option<PendingWithdraw>,
     /// Set while a swap's output transfer is outstanding, so no second fill can run.
     pub fill_in_flight: bool,
-    /// `token_a` decimals from NEP-148, cached at its first deposit. The minimum
-    /// credit deposit is 10^(decimals-3) base units (0.001 whole token, floor 1),
-    /// which bounds the storage cost of attacker-chosen credit keys; caching the
-    /// decimals keeps that rule off the per-receipt cross-contract view.
-    pub token_decimals_a: Option<u8>,
-    /// `token_b` decimals from NEP-148, cached at its first deposit (same rule).
-    pub token_decimals_b: Option<u8>,
 }
 
 /// The pair-token surface the pool calls, and nothing else.
@@ -273,31 +271,23 @@ impl Contract {
         share_name: String,
         share_symbol: String,
     ) -> Self {
-        if token_a == token_b {
-            env::panic_str("InvalidPair");
-        }
-        if swap_fee_bps >= 10_000 {
-            env::panic_str("InvalidFee");
-        }
+        require!(token_a != token_b, "InvalidPair");
+        require!((swap_fee_bps as u128) < BPS, "InvalidFee");
 
         let mut contract = Self {
             token_a,
             token_b,
             swap_fee_bps,
-            reserve_a: 0,
-            reserve_b: 0,
-            index_a: shares::ONE,
-            index_b: shares::ONE,
-            total_credit_shares_a: 0,
-            total_credit_shares_b: 0,
+            sides: [
+                TokenSide { reserve: 0, index: shares::ONE, credit_shares: 0, decimals: None },
+                TokenSide { reserve: 0, index: shares::ONE, credit_shares: 0, decimals: None },
+            ],
             deposits: LookupMap::new(b"d".to_vec()),
             owed: LookupMap::new(b"o".to_vec()),
             pending_swap: None,
             pending_add_liquidity: None,
             pending_withdraw: None,
             fill_in_flight: false,
-            token_decimals_a: None,
-            token_decimals_b: None,
         };
 
         contract.set_metadata(&ContractMetadata::new(share_name, share_symbol, 18));
@@ -313,9 +303,9 @@ impl Contract {
         "krater".to_string()
     }
 
-    /// Pool version, as recorded in the manifest.
+    /// Pool version, from the crate version in `Cargo.toml`.
     pub fn pool_version(&self) -> String {
-        "1.0.0".to_string()
+        env!("CARGO_PKG_VERSION").to_string()
     }
 
     /// URL of the machine-readable manifest served from the repository.
@@ -338,20 +328,21 @@ impl Contract {
     /// deposit and the read does not change the nominal value. Tokens outside the
     /// pair are never credited, so they have no entry.
     pub fn get_deposits(&self, account_id: AccountId) -> Vec<U128> {
+        let (index_a, index_b) = (self.sides[0].index, self.sides[1].index);
         vec![
             U128(shares::credit_nominal(
                 self.deposits
                     .get(&(account_id.clone(), self.token_a.clone()))
                     .copied()
                     .unwrap_or(0),
-                self.index_a,
+                index_a,
             )),
             U128(shares::credit_nominal(
                 self.deposits
                     .get(&(account_id, self.token_b.clone()))
                     .copied()
                     .unwrap_or(0),
-                self.index_b,
+                index_b,
             )),
         ]
     }
@@ -388,16 +379,10 @@ impl Contract {
     #[payable]
     pub fn add_liquidity(&mut self, amounts: Vec<U128>, min_shares: U128) -> Promise {
         assert_one_yocto();
-        if amounts.len() != 2 {
-            env::panic_str("InvalidAmounts");
-        }
+        require!(amounts.len() == 2, "InvalidAmounts");
         let (amount_a, amount_b) = (amounts[0].0, amounts[1].0);
-        if amount_a == 0 || amount_b == 0 {
-            env::panic_str("AmountTooSmall");
-        }
-        if self.is_busy() {
-            env::panic_str("Busy");
-        }
+        require!(amount_a != 0 && amount_b != 0, "AmountTooSmall");
+        require!(!self.is_busy(), "Busy");
 
         self.pending_add_liquidity = Some(PendingAddLiquidity {
             owner_id: env::predecessor_account_id(),
@@ -472,22 +457,8 @@ impl Contract {
             return;
         }
 
-        if plan.nominal_a > 0 {
-            PoolEvent::CreditSpent {
-                account_id: plan.owner.clone(),
-                token: plan.token_a.clone(),
-                amount: U128(plan.nominal_a),
-            }
-            .emit();
-        }
-        if plan.nominal_b > 0 {
-            PoolEvent::CreditSpent {
-                account_id: plan.owner.clone(),
-                token: plan.token_b.clone(),
-                amount: U128(plan.nominal_b),
-            }
-            .emit();
-        }
+        self.emit_credit_spent(&plan.owner, &plan.token_a, plan.nominal_a);
+        self.emit_credit_spent(&plan.owner, &plan.token_b, plan.nominal_b);
         PoolEvent::Deposit {
             who: plan.owner.clone(),
             amount_a: U128(plan.nominal_a),
@@ -513,17 +484,14 @@ impl Contract {
     #[payable]
     pub fn withdraw(&mut self, shares: U128) -> Promise {
         assert_one_yocto();
-        if shares.0 == 0 {
-            env::panic_str("AmountTooSmall");
-        }
-        if self.is_busy() {
-            env::panic_str("Busy");
-        }
+        require!(shares.0 != 0, "AmountTooSmall");
+        require!(!self.is_busy(), "Busy");
 
         let who = env::predecessor_account_id();
-        if Nep141Controller::balance_of(self, account_ref(&who)) < shares.0 {
-            env::panic_str("InsufficientShares");
-        }
+        require!(
+            Nep141Controller::balance_of(self, account_ref(&who)) >= shares.0,
+            "InsufficientShares"
+        );
 
         self.pending_withdraw = Some(PendingWithdraw {
             owner_id: who,
@@ -553,8 +521,8 @@ impl Contract {
             return;
         }
 
-        let amount_a = shares::proportional_amount(pending.shares, self.reserve_a, supply);
-        let amount_b = shares::proportional_amount(pending.shares, self.reserve_b, supply);
+        let amount_a = shares::proportional_amount(pending.shares, self.sides[0].reserve, supply);
+        let amount_b = shares::proportional_amount(pending.shares, self.sides[1].reserve, supply);
         if amount_a == 0 && amount_b == 0 {
             env::log_str("withdraw rejected: both legs round to zero");
             return;
@@ -578,28 +546,22 @@ impl Contract {
         }
         .emit();
 
-        if amount_a > 0 {
-            token_transfer(&token_a, &pending.owner_id, amount_a)
-                .then(
-                    Contract::ext_self()
-                        .with_static_gas(GAS_FOR_SYNC_CALLBACK)
-                        .withdraw_callback(
-                            pending.owner_id.clone(),
-                            token_a.clone(),
-                            U128(amount_a),
-                        ),
-                )
-                .detach();
+        self.pay_withdraw_leg(&token_a, &pending.owner_id, amount_a);
+        self.pay_withdraw_leg(&token_b, &pending.owner_id, amount_b);
+    }
+
+    /// Send one withdrawal leg and record it as owed if the token refuses it.
+    fn pay_withdraw_leg(&self, token: &AccountId, owner: &AccountId, amount: u128) {
+        if amount == 0 {
+            return;
         }
-        if amount_b > 0 {
-            token_transfer(&token_b, &pending.owner_id, amount_b)
-                .then(
-                    Contract::ext_self()
-                        .with_static_gas(GAS_FOR_SYNC_CALLBACK)
-                        .withdraw_callback(pending.owner_id.clone(), token_b, U128(amount_b)),
-                )
-                .detach();
-        }
+        token_transfer(token, owner, amount)
+            .then(
+                Contract::ext_self()
+                    .with_static_gas(GAS_FOR_SYNC_CALLBACK)
+                    .withdraw_callback(owner.clone(), token.clone(), U128(amount)),
+            )
+            .detach();
     }
 
     /// Record a payout leg the token refused.
@@ -633,20 +595,26 @@ impl Contract {
     #[payable]
     pub fn claim_owed(&mut self, token: AccountId) -> Promise {
         assert_one_yocto();
-        if !self.is_pair_token(&token) {
-            env::panic_str("UnknownToken");
-        }
+        require!(self.is_pair_token(&token), "UnknownToken");
         let who = env::predecessor_account_id();
         let amount = self.take_owed(&who, &token);
-        if amount == 0 {
-            env::panic_str("AmountTooSmall");
-        }
+        require!(amount != 0, "AmountTooSmall");
         self.sub_reserve(&token, amount);
 
-        token_transfer(&token, &who, amount).then(
+        self.transfer_with_owed_restore(&token, &who, amount)
+    }
+
+    /// Transfer `amount` and re-record it as owed if the token refuses the payout.
+    fn transfer_with_owed_restore(
+        &self,
+        token: &AccountId,
+        recipient: &AccountId,
+        amount: u128,
+    ) -> Promise {
+        token_transfer(token, recipient, amount).then(
             Contract::ext_self()
                 .with_static_gas(GAS_FOR_SYNC_CALLBACK)
-                .owed_restore_callback(who, token, U128(amount)),
+                .owed_restore_callback(recipient.clone(), token.clone(), U128(amount)),
         )
     }
 
@@ -731,32 +699,39 @@ impl Contract {
         }
     }
 
-    /// Cached tradeable reserve of `token`.
+    /// Pair slot for `token`.
     ///
     /// # Panics
     /// `UnknownToken` if `token` is not one of the pair tokens.
-    pub(crate) fn reserve_of(&self, token: &AccountId) -> u128 {
+    pub(crate) fn side_index(&self, token: &AccountId) -> usize {
         if token == &self.token_a {
-            self.reserve_a
+            0
         } else if token == &self.token_b {
-            self.reserve_b
+            1
         } else {
             env::panic_str("UnknownToken")
         }
     }
 
+    /// Per-token state for `token`.
+    pub(crate) fn side(&self, token: &AccountId) -> &TokenSide {
+        &self.sides[self.side_index(token)]
+    }
+
+    /// Mutable per-token state for `token`.
+    pub(crate) fn side_mut(&mut self, token: &AccountId) -> &mut TokenSide {
+        let index = self.side_index(token);
+        &mut self.sides[index]
+    }
+
+    /// Cached tradeable reserve of `token`.
+    pub(crate) fn reserve_of(&self, token: &AccountId) -> u128 {
+        self.side(token).reserve
+    }
+
     /// Overwrite the cached tradeable reserve of `token`.
-    ///
-    /// # Panics
-    /// `UnknownToken` if `token` is not one of the pair tokens.
     pub(crate) fn set_reserve(&mut self, token: &AccountId, value: u128) {
-        if token == &self.token_a {
-            self.reserve_a = value;
-        } else if token == &self.token_b {
-            self.reserve_b = value;
-        } else {
-            env::panic_str("UnknownToken");
-        }
+        self.side_mut(token).reserve = value;
     }
 
     /// Raise the cached reserve of `token` by `delta`.
@@ -765,58 +740,34 @@ impl Contract {
     /// saturate instead of panicking: a failure path has to be able to record its
     /// debt rather than revert the receipt that discovered it.
     pub(crate) fn add_reserve(&mut self, token: &AccountId, delta: u128) {
-        let value = self.reserve_of(token).saturating_add(delta);
-        self.set_reserve(token, value);
+        let side = self.side_mut(token);
+        side.reserve = side.reserve.saturating_add(delta);
     }
 
     /// Lower the cached reserve of `token` by `delta`, saturating at zero.
     pub(crate) fn sub_reserve(&mut self, token: &AccountId, delta: u128) {
-        let value = self.reserve_of(token).saturating_sub(delta);
-        self.set_reserve(token, value);
+        let side = self.side_mut(token);
+        side.reserve = side.reserve.saturating_sub(delta);
     }
 
     /// Cached NEP-148 decimals of `token`, if a deposit has read them.
     pub(crate) fn decimals_of(&self, token: &AccountId) -> Option<u8> {
-        if token == &self.token_a {
-            self.token_decimals_a
-        } else if token == &self.token_b {
-            self.token_decimals_b
-        } else {
-            env::panic_str("UnknownToken")
-        }
+        self.side(token).decimals
     }
 
     /// Cache NEP-148 decimals for `token`.
     pub(crate) fn set_decimals(&mut self, token: &AccountId, decimals: u8) {
-        if token == &self.token_a {
-            self.token_decimals_a = Some(decimals);
-        } else if token == &self.token_b {
-            self.token_decimals_b = Some(decimals);
-        } else {
-            env::panic_str("UnknownToken");
-        }
+        self.side_mut(token).decimals = Some(decimals);
     }
 
     /// Credit shares held for `token` across all accounts.
     pub(crate) fn total_credit_shares(&self, token: &AccountId) -> u128 {
-        if token == &self.token_a {
-            self.total_credit_shares_a
-        } else if token == &self.token_b {
-            self.total_credit_shares_b
-        } else {
-            env::panic_str("UnknownToken")
-        }
+        self.side(token).credit_shares
     }
 
     /// Overwrite the credit-share total for `token`.
     pub(crate) fn set_total_credit_shares(&mut self, token: &AccountId, value: u128) {
-        if token == &self.token_a {
-            self.total_credit_shares_a = value;
-        } else if token == &self.token_b {
-            self.total_credit_shares_b = value;
-        } else {
-            env::panic_str("UnknownToken");
-        }
+        self.side_mut(token).credit_shares = value;
     }
 
     /// Credit shares held for `account_id` in `token`.
@@ -931,13 +882,7 @@ impl Contract {
             .saturating_add(GAS_FOR_SYNC_CALLBACK.as_gas())
             .saturating_add(GAS_DISPATCH_HEADROOM.as_gas());
         if remaining_gas() > budget {
-            token_transfer(token, recipient, amount)
-                .then(
-                    Contract::ext_self()
-                        .with_static_gas(GAS_FOR_SYNC_CALLBACK)
-                        .owed_restore_callback(recipient.clone(), token.clone(), U128(amount)),
-                )
-                .detach();
+            self.transfer_with_owed_restore(token, recipient, amount).detach();
             return true;
         }
 
@@ -965,7 +910,8 @@ impl Contract {
     fn plan_add(&self, add: &PendingAddLiquidity) -> Result<AddPlan, &'static str> {
         let token_a = self.token_a.clone();
         let token_b = self.token_b.clone();
-        let (index_a, index_b) = (self.index_a, self.index_b);
+        let (index_a, index_b) = (self.sides[0].index, self.sides[1].index);
+        let (reserve_a, reserve_b) = (self.sides[0].reserve, self.sides[1].reserve);
         let credit_a = self.credit_of(&add.owner_id, &token_a);
         let credit_b = self.credit_of(&add.owner_id, &token_b);
         // `credit_shares_ceil` narrows a `U256` to `u128` and panics outside the
@@ -999,8 +945,8 @@ impl Contract {
             // The same narrowing rule applies to the minted shares: refuse an add
             // whose ratio cannot fit in `u128` instead of letting the helper panic
             // after the slot was taken.
-            if !shares_fit(add.amount_a, self.reserve_a, supply)
-                || !shares_fit(add.amount_b, self.reserve_b, supply)
+            if !shares_fit(add.amount_a, reserve_a, supply)
+                || !shares_fit(add.amount_b, reserve_b, supply)
             {
                 return Err("MathOverflow");
             }
@@ -1008,8 +954,8 @@ impl Contract {
             // Later adds mint the smaller of the two ratios; a zero-reserve side is
             // unbounded (`u128::MAX`), so it cannot bind.
             let minted = core::cmp::min(
-                shares::proportional_shares(add.amount_a, self.reserve_a, supply),
-                shares::proportional_shares(add.amount_b, self.reserve_b, supply),
+                shares::proportional_shares(add.amount_a, reserve_a, supply),
+                shares::proportional_shares(add.amount_b, reserve_b, supply),
             );
             if minted == u128::MAX {
                 // Both reserves are empty: two unbounded sides carry no price.
@@ -1022,11 +968,11 @@ impl Contract {
                 return Err("MinSharesNotMet");
             }
             let nominal_a = core::cmp::min(
-                shares::proportional_amount_ceil(minted, self.reserve_a, supply),
+                shares::proportional_amount_ceil(minted, reserve_a, supply),
                 shares::credit_nominal(credit_a, index_a),
             );
             let nominal_b = core::cmp::min(
-                shares::proportional_amount_ceil(minted, self.reserve_b, supply),
+                shares::proportional_amount_ceil(minted, reserve_b, supply),
                 shares::credit_nominal(credit_b, index_b),
             );
             (false, minted, nominal_a, nominal_b)
@@ -1052,6 +998,18 @@ impl Contract {
         self.add_credit(&plan.owner, &plan.token_b, plan.credit_b);
         self.sub_reserve(&plan.token_a, plan.nominal_a);
         self.sub_reserve(&plan.token_b, plan.nominal_b);
+    }
+
+    /// Emit `CreditSpent` when a credit leg actually spent something.
+    fn emit_credit_spent(&self, account_id: &AccountId, token: &AccountId, amount: u128) {
+        if amount > 0 {
+            PoolEvent::CreditSpent {
+                account_id: account_id.clone(),
+                token: token.clone(),
+                amount: U128(amount),
+            }
+            .emit();
+        }
     }
 
     /// Emit `AddLiquidityFailed` with the reason the add could not mint.
