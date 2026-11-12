@@ -180,6 +180,7 @@ async function bootSandbox() {
     rebasingId,
     taxedId,
     alice,
+    pool,
   };
 }
 
@@ -205,13 +206,20 @@ async function attachRpc() {
 
 async function main() {
   const chain = RPC_URL ? await attachRpc() : await bootSandbox();
-  const { provider, poolId, rebasingId, taxedId, alice } = chain;
+  const { provider, poolId, rebasingId, taxedId, alice, pool } = chain;
 
   try {
     // Registration first: receiving a NEP-141 balance or a share requires a
     // storage deposit on the contract that will hold it.
     for (const contractId of [rebasingId, taxedId, poolId]) {
       await register(alice, contractId, alice.accountId);
+    }
+
+    if (chain.mode === "sandbox") {
+      // The pool must be registered on both fixtures before it can hold them.
+      for (const tokenId of [rebasingId, taxedId]) {
+        await register(pool, tokenId, poolId);
+      }
     }
 
     // Fund the demo account from the fixture's free mint.
@@ -329,7 +337,7 @@ async function main() {
 
     // The demo only counts if value moved: shares were minted, the swap changed
     // a cached reserve, and the pool emitted its own Swap event.
-    const swapEvents = kraterEvents(swapOutcome).filter((event) => event.event === "Swap");
+    const swapEvents = kraterEvents(swapOutcome).filter((event) => event.event === "swap");
     assert(shares > 0n, `add_liquidity minted no LP shares to ${alice.accountId}`);
     assert(
       BigInt(reservesAfterSwap[0]) !== BigInt(reservesAfterAdd[0]) ||

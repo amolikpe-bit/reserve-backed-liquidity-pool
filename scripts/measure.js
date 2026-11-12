@@ -171,6 +171,7 @@ async function bootSandbox() {
     taxedId,
     alice,
     carol,
+    pool,
     payer: root,
   };
 }
@@ -270,7 +271,7 @@ async function balances(provider, tokenIds, accountId) {
 
 async function main() {
   const chain = RPC_URL ? await attachRpc() : await bootSandbox();
-  const { provider, poolId, rebasingId, taxedId, alice, carol, payer } = chain;
+  const { provider, poolId, rebasingId, taxedId, alice, carol, payer, pool } = chain;
 
   try {
     for (const contractId of [rebasingId, taxedId, poolId]) {
@@ -279,6 +280,12 @@ async function main() {
     // Carol is registered on the pool (so she can receive shares) but
     // deliberately not on the tokens: her first payout fails and lands in owed.
     await register(carol, poolId, carol.accountId);
+
+    if (chain.mode === "sandbox") {
+      for (const tokenId of [rebasingId, taxedId]) {
+        await register(pool, tokenId, poolId);
+      }
+    }
 
     for (const tokenId of [rebasingId, taxedId]) {
       await call(
@@ -304,6 +311,7 @@ async function main() {
       account_id: alice.accountId,
     });
 
+    const gas = {};
     gas.add_liquidity = await measured(
       "add_liquidity",
       call(
@@ -365,7 +373,7 @@ async function main() {
       { gas: GAS_CREDIT, deposit: "1" },
     );
     gas.swap = await measured("swap", swapCall, GAS_CREDIT);
-    const swapEvents = kraterEvents(await swapCall).filter((event) => event.event === "Swap");
+    const swapEvents = kraterEvents(await swapCall).filter((event) => event.event === "swap");
     if (swapEvents.length === 0) {
       throw new Error(
         "the swap receipt tree has no krater Swap event; it refunded instead of filling",
