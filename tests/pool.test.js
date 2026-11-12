@@ -37,8 +37,8 @@ const E18 = 10n ** 18n;
 const FUND = 1_000n * E18;
 const SEED = 200n * E18;
 
-// Origin constants (test/RebaseAbsorbHook.t.sol): 30 bps swap fee, 200 bps
-// transfer tax, and a seeded loop shape instead of Foundry's coverage fuzz.
+// Origin constants (the origin's hook test suite): 30 bps swap fee, 200 bps
+// transfer tax, and a seeded loop shape instead of the origin's coverage fuzz.
 const FEE_BPS = 30;
 const TRANSFER_TAX_BPS = 200;
 const FUZZ_ITERATIONS = 8;
@@ -663,8 +663,8 @@ describe("W2 flows", { concurrency: 1 }, () => {
   });
 });
 
-// W3 regression matrix. The origin named these rows in
-// `test/RebaseAbsorbHook.t.sol` and the port's steps 4-9; each test below says
+// W3 regression matrix. The origin named these rows in its hook test suite and
+// the port's steps 4-9; each test below says
 // which behaviour it pins. All flows await FINAL, so the assertions see the
 // settlement callbacks, not just the call that scheduled them.
 describe("W3 regression matrix", { concurrency: 1 }, () => {

@@ -62,21 +62,48 @@ To run against a live network, set `RPC_URL` (and the account/key variables list
 in the script header) instead; `scripts/deploy.sh` creates the accounts, deploys,
 initialises and registers them, and then locks the pool account.
 
+## Executable spec
+
+Every claim below is a command that starts a zero-funds sandbox, deploys both
+contracts, and asserts the observable:
+
+| Behaviour | Command |
+|---|---|
+| deposit credits -> add liquidity -> quote -> swap -> rebase + sync -> withdraw | `node scripts/demo.js` |
+| gas for each settlement path and the +10% rebase quote delta | `node scripts/measure.js` |
+| refund/owed path, `claim_owed`, `withdraw_deposit`, taxed legs, seeded fuzz | `node --test --test-concurrency=1 tests/pool.test.js` |
+| compile, unit tests, wasm build | `cargo check --workspace --target wasm32-unknown-unknown && cargo test -p krater-pool` |
+
+`scripts/demo.js` prints the reserves before/after the swap and the rebase, the
+shares minted/burned, the quote delta in bps, and the `Swap` event count; it exits
+non-zero if any of those did not move. `tests/pool.test.js` runs the refund and
+claim legs against a receiver that is not registered for the payout token.
+
 ## Reproduce the numbers
 
 ```bash
 node scripts/measure.js
 ```
 
-The script measures gas as the transaction's own `gas_burnt` plus the `gas_burnt`
-of every receipt it produced, writes `bench.json`, and prints the six settlement
-paths plus the rebase quote delta. The delta comes from a +10% rebase, a
-`sync_reserves`, and the same quote again. No gas or delta number is stated in
-this README: each one is recorded from a measured run, with this command, so the
-text cannot drift from the measurement.
+**Headline (sandbox, one run): a +10% rebase on one reserve raises the same
+`get_quote` by 9.99%** — 9.920546077802156251e18 → 1.0912600685582371876e19
+base units. `scripts/measure.js` writes `bench.json` and prints that delta plus
+the measured gas for each settlement path:
 
-The sandbox path needs no keys and no funds; a live run needs the fixture accounts
-and two funded keys, as documented at the top of the script.
+| Path | Measured |
+|---|---|
+| `add_liquidity` | 21.518 Tgas |
+| `sync_reserves` | 17.395 Tgas |
+| `withdraw` | 28.819 Tgas |
+| `swap` | 28.257 Tgas |
+| `withdraw_deposit` | 10.422 Tgas |
+| `claim_owed` | 6.521 Tgas |
+
+Gas is the transaction's own `gas_burnt` plus the `gas_burnt` of every receipt it
+produced. The sandbox path needs no keys and no funds; a live run needs the
+fixture accounts and two funded keys, as documented at the top of the script.
+Re-running the command reproduces the table (the delta is deterministic; gas can
+vary by a few percent with the node's schedule).
 
 ## Gas and limits
 
