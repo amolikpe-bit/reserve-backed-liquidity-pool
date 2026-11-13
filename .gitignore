@@ -17,3 +17,6 @@ node_modules/
 
 # Compiled contract artifacts outside the build directory
 *.wasm
+
+# local optimized wasm (build artifact, not source)
+/local-build/

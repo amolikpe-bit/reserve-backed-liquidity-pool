@@ -1153,18 +1153,15 @@ dependencies = [
  "near-contract-standards",
  "near-sdk",
  "primitive-types 0.14.0",
- "serde",
 ]
 
 [[package]]
 name = "krater-pool"
 version = "1.0.0"
 dependencies = [
- "near-contract-standards",
  "near-sdk",
  "near-sdk-contract-tools",
  "primitive-types 0.14.0",
- "serde",
 ]
 
 [[package]]
