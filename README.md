@@ -39,7 +39,7 @@ credits. Everything the pool emits is NEP-297 JSON, standard `krater`.
 ## Quickstart
 
 Requirements: Rust 1.95 or newer (edition 2024), cargo-near 0.23.0,
-near-cli-rs 0.31.1, Node 22.22.2 or newer, pnpm 10.4.1 or newer.
+near-cli-rs 0.31.1, wasm-opt (binaryen), Node 22.22.2 or newer, pnpm 10.4.1 or newer.
 
 ```bash
 git clone https://github.com/nirholas/near-krater && cd near-krater && cargo near build non-reproducible-wasm && node scripts/demo.js
@@ -57,6 +57,11 @@ balance.
 default reproducible variant runs Docker against committed source (and needs it
 pushed to deploy), and is used only for a pinned-image release, which the
 quickstart does not cover.
+
+`scripts/deploy.sh` builds both crates, then runs
+`scripts/optimize-wasm.sh` on the exact artifact it deploys. The script applies
+`wasm-opt -Oz --converge` with cargo-near's wasm feature set after its built-in
+`-O` pass; the measured pool wasm drops from 305,436 to 300,324 bytes (−1.67%).
 
 To run against a live network, set `RPC_URL` (and the account/key variables listed
 in the script header) instead; `scripts/deploy.sh` creates the accounts, deploys,

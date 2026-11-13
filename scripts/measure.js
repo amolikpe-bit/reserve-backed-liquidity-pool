@@ -6,7 +6,7 @@
 // gas_burnt plus the gas_burnt of every receipt it produced. The RPC response has
 // no total field, so the sum is the number.
 //
-// Default (RPC_URL unset): boots a near-kit sandbox, deploys the built wasm, and
+// Default (RPC_URL unset): boots a near-sandbox chain, deploys the built wasm, and
 // measures with zero-funds accounts.
 //
 // Live network: set RPC_URL, KRATER_CONTRACT, REBASING_ACCOUNT, TAXED_ACCOUNT,

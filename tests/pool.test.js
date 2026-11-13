@@ -1,4 +1,4 @@
-// Surface and flow tests for the Krater pool, on a near-kit sandbox.
+// Surface and flow tests for the Krater pool, on a near-sandbox chain.
 //
 // W1 covers what the scaffold promises: the metadata views match the shipped
 // manifest, the share token is NEP-148 with 18 decimals, `new` refuses an equal
@@ -18,7 +18,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { after, before, describe, test } from "node:test";
 import { Account, JsonRpcProvider, actions } from "near-api-js";
-import { Sandbox } from "near-kit/sandbox";
+import { Sandbox, DEFAULT_ACCOUNT_ID, DEFAULT_PRIVATE_KEY } from "near-sandbox";
 import {
   call,
   callRaw,
@@ -26,6 +26,7 @@ import {
   deploy,
   logsOf,
   readWasm,
+  toYocto,
   view as harnessView,
   GAS,
   POOL_WASM,
@@ -178,10 +179,10 @@ before(async () => {
   manifest = JSON.parse(await readFile("manifest.json", "utf8"));
   const [poolWasm, mockWasm] = await Promise.all([readWasm(POOL_WASM), readWasm(MOCK_FT_WASM)]);
 
-  sandbox = await Sandbox.start();
+  sandbox = await Sandbox.start({});
   provider = new JsonRpcProvider({ url: sandbox.rpcUrl });
-  const root = new Account(sandbox.rootAccount.id, provider, sandbox.rootAccount.secretKey);
-  const suffix = sandbox.rootAccount.id;
+  const root = new Account(DEFAULT_ACCOUNT_ID, provider, DEFAULT_PRIVATE_KEY);
+  const suffix = DEFAULT_ACCOUNT_ID;
 
   poolId = `pool.${suffix}`;
   rebasingId = `rebasing.${suffix}`;
@@ -220,7 +221,7 @@ before(async () => {
 
 after(async () => {
   if (sandbox) {
-    await sandbox.stop();
+    await sandbox.tearDown();
   }
 });
 
@@ -299,10 +300,10 @@ test("the pool advertises the five manifest tags", async () => {
 
 describe("W2 flows", { concurrency: 1 }, () => {
   before(async () => {
-    const root = new Account(sandbox.rootAccount.id, provider, sandbox.rootAccount.secretKey);
-    aliceId = `alice.${sandbox.rootAccount.id}`;
-    bobId = `bob.${sandbox.rootAccount.id}`;
-    carolId = `carol.${sandbox.rootAccount.id}`;
+    const root = new Account(DEFAULT_ACCOUNT_ID, provider, DEFAULT_PRIVATE_KEY);
+    aliceId = `alice.${DEFAULT_ACCOUNT_ID}`;
+    bobId = `bob.${DEFAULT_ACCOUNT_ID}`;
+    carolId = `carol.${DEFAULT_ACCOUNT_ID}`;
     alice = await createAccount(root, aliceId, "50 NEAR");
     bob = await createAccount(root, bobId, "50 NEAR");
     carol = await createAccount(root, carolId, "50 NEAR");
@@ -616,8 +617,8 @@ describe("W2 flows", { concurrency: 1 }, () => {
 // settlement callbacks, not just the call that scheduled them.
 describe("W3 regression matrix", { concurrency: 1 }, () => {
   before(async () => {
-    const root = new Account(sandbox.rootAccount.id, provider, sandbox.rootAccount.secretKey);
-    daveId = `dave.${sandbox.rootAccount.id}`;
+    const root = new Account(DEFAULT_ACCOUNT_ID, provider, DEFAULT_PRIVATE_KEY);
+    daveId = `dave.${DEFAULT_ACCOUNT_ID}`;
     dave = await createAccount(root, daveId, "50 NEAR");
 
     const storage = toYocto("0.02");

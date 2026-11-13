@@ -8,7 +8,7 @@ import {
   nearToYocto,
   teraToGas,
 } from "near-api-js";
-import { Sandbox } from "near-kit/sandbox";
+import { Sandbox, DEFAULT_ACCOUNT_ID, DEFAULT_PRIVATE_KEY } from "near-sandbox";
 
 export const ONE = 10n ** 18n;
 export const TOKEN_SCALE = 1_000n * ONE;
@@ -126,10 +126,10 @@ export async function bootSandbox({
   shareSymbol = "K-LP-demo",
   withCarol = false,
 } = {}) {
-  const sandbox = await Sandbox.start();
+  const sandbox = await Sandbox.start({});
   const provider = new JsonRpcProvider({ url: sandbox.rpcUrl });
-  const root = new Account(sandbox.rootAccount.id, provider, sandbox.rootAccount.secretKey);
-  const suffix = sandbox.rootAccount.id;
+  const root = new Account(DEFAULT_ACCOUNT_ID, provider, DEFAULT_PRIVATE_KEY);
+  const suffix = DEFAULT_ACCOUNT_ID;
 
   const [poolWasm, mockWasm] = await Promise.all([readWasm(POOL_WASM), readWasm(MOCK_FT_WASM)]);
 

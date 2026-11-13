@@ -2,9 +2,9 @@
 # Deploy krater to a NEAR network, initialise it, register the accounts that will
 # hold its LP shares, and then lock the pool account by deleting every access key.
 #
-# Required tools: cargo-near (0.23.0), near-cli-rs (0.31.1), a funded signer in the
-# OS keychain. Nothing is read from a private key file: near-cli-rs signs with the
-# keychain entry for the account named in each command.
+# Required tools: cargo-near (0.23.0), near-cli-rs (0.31.1), wasm-opt (binaryen),
+# and a funded signer in the OS keychain. Nothing is read from a private key file:
+# near-cli-rs signs with the keychain entry for the account in each command.
 #
 # Environment (all optional, defaults in parentheses):
 #   KRATER_ACCOUNT   (krater.testnet)             the pool account
@@ -35,6 +35,8 @@
 # `new` runs once.
 
 set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 KRATER_ACCOUNT="${KRATER_ACCOUNT:-krater.testnet}"
 REBASING_ACCOUNT="${REBASING_ACCOUNT:-rebasing.krater.testnet}"
@@ -104,13 +106,20 @@ create_subaccount() {
     network-config "$NEAR_NETWORK" sign-with-keychain send
 }
 
-# `cargo near deploy` builds the local variant itself. The reproducible variant
-# needs Docker plus a pushed tree, so it is not part of this script; init stays a
-# separate near-cli-rs call so its gas and zero deposit are explicit.
+# Build the local variant, then apply the measured second wasm-opt pass to the
+# exact artifact that is deployed. The reproducible variant needs Docker plus a
+# pushed tree, so it is not part of this script; init stays a separate
+# near-cli-rs call so its gas and zero deposit are explicit.
+build_contract() {
+  local crate_dir="$1" package="$2"
+  ( cd "$REPO_ROOT/$crate_dir" && cargo near build non-reproducible-wasm )
+  bash "$REPO_ROOT/scripts/optimize-wasm.sh" "$REPO_ROOT/target/near/$package/$package.wasm"
+}
+
 deploy_contract() {
-  local account_id="$1" crate_dir="$2"
-  ( cd "$crate_dir" && cargo near deploy build-non-reproducible-wasm "$account_id" \
-      without-init-call network-config "$NEAR_NETWORK" sign-with-keychain send )
+  local account_id="$1" wasm="$2"
+  near contract deploy "$account_id" use-file "$wasm" without-init-call \
+    network-config "$NEAR_NETWORK" sign-with-keychain send
 }
 
 call_function() {
@@ -159,7 +168,10 @@ lock_pool_account() {
 
 printf 'network %s, pool %s\n' "$NEAR_NETWORK" "$KRATER_ACCOUNT"
 
-
+# Build and optimize before touching the network: a compile or wasm-opt failure
+# must not come after account creation and faucet funding.
+build_contract contracts/pool krater_pool
+build_contract contracts/mock-ft krater_mock_ft
 
 create_pool_account
 create_subaccount "$REBASING_ACCOUNT"
@@ -168,9 +180,9 @@ for demo in $DEMO_ACCOUNTS; do
   create_subaccount "$demo"
 done
 
-deploy_contract "$KRATER_ACCOUNT" contracts/pool
-deploy_contract "$REBASING_ACCOUNT" contracts/mock-ft
-deploy_contract "$TAXED_ACCOUNT" contracts/mock-ft
+deploy_contract "$KRATER_ACCOUNT" "$REPO_ROOT/target/near/krater_pool/krater_pool.wasm"
+deploy_contract "$REBASING_ACCOUNT" "$REPO_ROOT/target/near/krater_mock_ft/krater_mock_ft.wasm"
+deploy_contract "$TAXED_ACCOUNT" "$REPO_ROOT/target/near/krater_mock_ft/krater_mock_ft.wasm"
 
 cat >"$WORK_DIR/pool-args.json" <<JSON
 {

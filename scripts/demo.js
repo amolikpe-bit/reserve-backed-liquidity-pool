@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Krater demo: deposit credits, add liquidity, quote, swap, rebase, sync, withdraw.
 //
-// Default (RPC_URL unset): boots a near-kit sandbox, deploys the built wasm, and
+// Default (RPC_URL unset): boots a near-sandbox chain, deploys the built wasm, and
 // runs the whole loop with zero-funds accounts. Set RPC_URL to run against a live
 // network instead, in which case KRATER_CONTRACT, REBASING_ACCOUNT, TAXED_ACCOUNT,
 // DEMO_ACCOUNT and KRATER_PRIVATE_KEY must all be set and the contracts must
