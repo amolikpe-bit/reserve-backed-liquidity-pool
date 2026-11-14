@@ -6,14 +6,20 @@ sequenceDiagram
     accTitle: krater runtime flow
     accDescr: Harness drives the sandbox: deploy, mint, deposit, add liquidity, rebase, swap, withdraw, claim.
     autonumber
+    box rgba(230,247,235,0.12) Clients
     participant S as Harness
     participant C as Sandbox
+    end
+    box rgba(243,232,255,0.12) NEAR contracts
     participant FT as PairFT
     participant P as kraterPool
+    end
     rect rgba(226,238,255,0.20)
     Note over S,FT: PHASE 1 — Deploy and register
     S->>C: bootSandbox(), createAccounts(4)
     S->>P: new(token_a, token_b, fee_bps)
+    activate P
+    deactivate P
     S->>FT: storage_deposit(pool)
     end
     rect rgba(230,247,235,0.20)
@@ -23,41 +29,49 @@ sequenceDiagram
     rect rgba(255,244,214,0.20)
     Note over S,P: PHASE 3 — Credit a deposit
     S->>FT: ft_transfer_call(pool, amount, "")
+    activate FT
     FT->>P: ft_on_transfer(sender_id, amount, msg)
     P->>P: credit_deposit() at the reported index
+    deactivate FT
     end
     rect rgba(243,232,255,0.20)
     Note over S,P: PHASE 4 — Add liquidity
     S->>P: add_liquidity(amounts, min_shares)
+    activate P
     P->>FT: ft_index(), ft_balance_of() x2
     P->>P: mint_shares(), lock MINIMUM_SHARES
+    deactivate P
     end
     rect rgba(255,232,232,0.20)
     Note over S,P: PHASE 5 — Sync and rebase
     S->>FT: rebase(factor_bps: 11_000)
-    S->>P: sync_reserves()
-    P-->>S: ReservesSynced, quote +9.99%
+    S->>+P: sync_reserves()
+    P-->>-S: ReservesSynced, quote +9.99%
     end
     rect rgba(224,247,250,0.20)
     Note over S,P: PHASE 6 — Swap
     S->>FT: ft_transfer_call(pool, Swap)
+    activate FT
     FT->>P: ft_on_transfer(), index_hop_a(true)
     alt out >= min_out
     P->>FT: ft_transfer(sender_id, out)
     else out is zero or below min_out
     P-->>S: refund of the input
     end
+    deactivate FT
     end
     rect rgba(255,248,225,0.20)
     Note over S,P: PHASE 7 — Withdraw shares
     S->>P: withdraw(shares)
+    activate P
     P->>P: settle_withdraw() burns, pays both legs
+    deactivate P
     end
     rect rgba(233,236,239,0.20)
     Note over S,P: PHASE 8 — Claim owed and events
     S->>P: claim_owed(token)
-    S->>P: withdraw_deposit(token, amount)
-    P-->>S: Withdraw, CreditWithdrawn events
+    S->>+P: withdraw_deposit(token, amount)
+    P-->>-S: Withdraw, CreditWithdrawn events
     end
 ```
 
