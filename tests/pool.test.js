@@ -18,14 +18,19 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { after, before, describe, test } from "node:test";
 import { Account, JsonRpcProvider, actions } from "near-api-js";
-import { Sandbox, DEFAULT_ACCOUNT_ID, DEFAULT_PRIVATE_KEY } from "near-sandbox";
+import { DEFAULT_ACCOUNT_ID, DEFAULT_PRIVATE_KEY } from "near-sandbox";
 import {
+  cacheCounts,
   call,
   callRaw,
   createAccount as newAccount,
+  createAccounts,
   deploy,
-  logsOf,
+  ftTransfers,
+  parseEvents,
   readWasm,
+  startSandbox,
+  stopSandbox,
   toYocto,
   view as harnessView,
   GAS,
@@ -41,10 +46,9 @@ const SEED = 200n * E18;
 // Origin constants (the origin's hook test suite): 30 bps swap fee, 200 bps
 // transfer tax, and a seeded loop shape instead of the origin's coverage fuzz.
 const FEE_BPS = 30;
-const TRANSFER_TAX_BPS = 200;
-const FUZZ_ITERATIONS = 8;
+const TAX_BPS = 200;
+const FUZZ_ITERS = 8;
 const FUZZ_SEED = 0xC0FFEE;
-
 let sandbox;
 let provider;
 let pool;
@@ -93,18 +97,14 @@ function callFailedLeg(
 ) {
   return account.signAndSendTransaction({
     receiverId: contractId,
-    actions: [actions.functionCall(methodName, args, BigInt(GAS(gas)), BigInt(deposit))],
+    actions: [actions.functionCall(methodName, args, GAS(gas), BigInt(deposit))],
     waitUntil: "FINAL",
     throwOnFailure: false,
   });
 }
 
-
 function eventsOf(outcome) {
-  const events = logsOf(outcome)
-    .filter((line) => line.startsWith("EVENT_JSON:"))
-    .map((line) => JSON.parse(line.slice("EVENT_JSON:".length)));
-
+  const events = parseEvents(outcome, seenEvents);
   for (const event of events) {
     assert.equal(typeof event.standard, "string", "EVENT_JSON standard is missing");
     assert.equal(typeof event.version, "string", "EVENT_JSON version is missing");
@@ -113,11 +113,7 @@ function eventsOf(outcome) {
       Object.prototype.hasOwnProperty.call(event, "data"),
       `EVENT_JSON ${event.event} data is missing`,
     );
-    if (event.standard === "krater") {
-      seenEvents.set(event.event, event);
-    }
   }
-
   return events;
 }
 
@@ -132,18 +128,10 @@ function successValue(outcome) {
   return decoded === "" ? null : JSON.parse(decoded);
 }
 
-function kraterEventOf(outcome, eventName) {
+function poolEvent(outcome, eventName) {
   return eventsOf(outcome).find(
     (event) => event.standard === "krater" && event.event === eventName,
   );
-}
-
-// NEP-141 events carry an array of records; every `ft_transfer` leg of a flow
-// is flattened so a test can assert on the amount and the receiver.
-function ftTransfersOf(outcome) {
-  return eventsOf(outcome)
-    .filter((event) => event.event === "ft_transfer")
-    .flatMap((event) => (Array.isArray(event.data) ? event.data : [event.data]));
 }
 
 function ceilDiv(numerator, denominator) {
@@ -179,7 +167,7 @@ before(async () => {
   manifest = JSON.parse(await readFile("manifest.json", "utf8"));
   const [poolWasm, mockWasm] = await Promise.all([readWasm(POOL_WASM), readWasm(MOCK_FT_WASM)]);
 
-  sandbox = await Sandbox.start({});
+  sandbox = await startSandbox();
   provider = new JsonRpcProvider({ url: sandbox.rpcUrl });
   const root = new Account(DEFAULT_ACCOUNT_ID, provider, DEFAULT_PRIVATE_KEY);
   const suffix = DEFAULT_ACCOUNT_ID;
@@ -190,11 +178,16 @@ before(async () => {
   const equalPairId = `equal-pair.${suffix}`;
   const badFeeId = `bad-fee.${suffix}`;
 
-  pool = await createAccount(root, poolId, "20 NEAR");
-  const rebasing = await createAccount(root, rebasingId, "20 NEAR");
-  const taxed = await createAccount(root, taxedId, "20 NEAR");
-  equalPair = await createAccount(root, equalPairId, "20 NEAR");
-  badFee = await createAccount(root, badFeeId, "20 NEAR");
+  const [poolAcc, rebasing, taxed, eqPair, bFee] = await createAccounts(provider, root, [
+    [poolId, "20 NEAR"],
+    [rebasingId, "20 NEAR"],
+    [taxedId, "20 NEAR"],
+    [equalPairId, "20 NEAR"],
+    [badFeeId, "20 NEAR"],
+  ]);
+  pool = poolAcc;
+  equalPair = eqPair;
+  badFee = bFee;
 
   await Promise.all([
     deploy(pool, poolId, poolWasm),
@@ -204,42 +197,41 @@ before(async () => {
     deploy(badFee, badFeeId, poolWasm),
   ]);
 
-  await call(pool, poolId, "new", {
-    token_a: rebasingId,
-    token_b: taxedId,
-    swap_fee_bps: FEE_BPS,
-    share_name: "Krater test LP",
-    share_symbol: "K-TEST",
-  }, { gas: 100 });
-  await call(rebasing, rebasingId, "new", {
-    name: "Krater Rebasing Fixture",
-    symbol: "kREB",
-  }, { gas: 30 });
-  await call(taxed, taxedId, "new", {
-    name: "Krater Taxed Fixture",
-    symbol: "kTAX",
-  }, { gas: 30 });
+  await Promise.all([
+    call(pool, poolId, "new", {
+      token_a: rebasingId,
+      token_b: taxedId,
+      swap_fee_bps: FEE_BPS,
+      share_name: "Krater test LP",
+      share_symbol: "K-TEST",
+    }, { gas: 100 }),
+    call(rebasing, rebasingId, "new", {
+      name: "Krater Rebasing Fixture",
+      symbol: "kREB",
+    }, { gas: 30 }),
+    call(taxed, taxedId, "new", {
+      name: "Krater Taxed Fixture",
+      symbol: "kTAX",
+    }, { gas: 30 }),
+  ]);
 });
 
 after(async () => {
-  const active = sandbox;
-  if (!active) return;
-  await Promise.race([
-    active.tearDown().catch(() => {}),
-    new Promise((resolve) => {
-      const timer = setTimeout(resolve, 15_000);
-      timer.unref();
-    }),
-  ]);
-  active.childProcess?.kill("SIGKILL");
+  await stopSandbox(sandbox);
 });
 
 // origin: test_metadata.
 test("the metadata views match the shipped manifest", async () => {
-  assert.equal(await view(poolId, "pool_name"), manifest.name);
-  assert.equal(await view(poolId, "pool_version"), manifest.version);
-  assert.equal(await view(poolId, "spec_uri"), SPEC_URI);
-  assert.deepEqual(await view(poolId, "pool_tags"), manifest.tags);
+  const [name, version, uri, tags] = await Promise.all([
+    view(poolId, "pool_name"),
+    view(poolId, "pool_version"),
+    view(poolId, "spec_uri"),
+    view(poolId, "pool_tags"),
+  ]);
+  assert.equal(name, manifest.name);
+  assert.equal(version, manifest.version);
+  assert.equal(uri, SPEC_URI);
+  assert.deepEqual(tags, manifest.tags);
 });
 
 // origin: test_metadata (the NEP-148 share record half).
@@ -313,50 +305,63 @@ describe("W2 flows", { concurrency: 1 }, () => {
     aliceId = `alice.${DEFAULT_ACCOUNT_ID}`;
     bobId = `bob.${DEFAULT_ACCOUNT_ID}`;
     carolId = `carol.${DEFAULT_ACCOUNT_ID}`;
-    alice = await createAccount(root, aliceId, "50 NEAR");
-    bob = await createAccount(root, bobId, "50 NEAR");
-    carol = await createAccount(root, carolId, "50 NEAR");
+    [alice, bob, carol] = await createAccounts(provider, root, [
+      [aliceId, "50 NEAR"],
+      [bobId, "50 NEAR"],
+      [carolId, "50 NEAR"],
+    ]);
 
     const storage = toYocto("0.02");
-    for (const account of [alice, bob, carol]) {
-      for (const contractId of [rebasingId, taxedId, poolId]) {
-        await call(account, contractId, "storage_deposit", {}, { deposit: storage, gas: 30 });
-      }
-    }
-    // The first mint locks MINIMUM_SHARES to the pool, every token transfer
-    // lands on the pool account, and its ledger is keyed by the pool itself.
-    await call(pool, poolId, "storage_deposit", { account_id: poolId }, { deposit: storage, gas: 30 });
-    await call(pool, rebasingId, "storage_deposit", {}, { deposit: storage, gas: 30 });
-    await call(pool, taxedId, "storage_deposit", {}, { deposit: storage, gas: 30 });
-
-    for (const contractId of [rebasingId, taxedId]) {
-      for (const [account, accountId] of [[alice, aliceId], [bob, bobId], [carol, carolId]]) {
-        await call(account, contractId, "mint", {
-          receiver_id: accountId,
-          amount: FUND.toString(),
-        }, { gas: 30 });
-      }
-    }
+    await Promise.all([
+      ...[
+        [alice, aliceId],
+        [bob, bobId],
+        [carol, carolId],
+      ].map(async ([account, accountId]) => {
+        for (const contractId of [rebasingId, taxedId, poolId]) {
+          await call(account, contractId, "storage_deposit", {}, { deposit: storage, gas: 30 });
+        }
+        for (const contractId of [rebasingId, taxedId]) {
+          await call(account, contractId, "mint", {
+            receiver_id: accountId,
+            amount: FUND.toString(),
+          }, { gas: 30 });
+        }
+      }),
+      // The first mint locks MINIMUM_SHARES to the pool, every token transfer
+      // lands on the pool account, and its ledger is keyed by the pool itself.
+      (async () => {
+        await call(pool, poolId, "storage_deposit", { account_id: poolId }, { deposit: storage, gas: 30 });
+        await call(pool, rebasingId, "storage_deposit", {}, { deposit: storage, gas: 30 });
+        await call(pool, taxedId, "storage_deposit", {}, { deposit: storage, gas: 30 });
+      })(),
+    ]);
   });
 
   // origin: ForgeTest.setUp harness (holders funded and registered).
   test("setup: holders are registered and funded on both fixtures", async () => {
-    for (const accountId of [aliceId, bobId, carolId]) {
-      assert.ok(await view(rebasingId, "storage_balance_of", { account_id: accountId }));
-      assert.ok(await view(taxedId, "storage_balance_of", { account_id: accountId }));
-      assert.ok(await view(poolId, "storage_balance_of", { account_id: accountId }));
-      assert.equal(
-        await view(rebasingId, "ft_balance_of", { account_id: accountId }),
-        FUND.toString(),
-      );
-      assert.equal(
-        await view(taxedId, "ft_balance_of", { account_id: accountId }),
-        FUND.toString(),
-      );
+    const holderViews = await Promise.all(
+      [aliceId, bobId, carolId].flatMap((accountId) => [
+        view(rebasingId, "storage_balance_of", { account_id: accountId }),
+        view(taxedId, "storage_balance_of", { account_id: accountId }),
+        view(poolId, "storage_balance_of", { account_id: accountId }),
+        view(rebasingId, "ft_balance_of", { account_id: accountId }),
+        view(taxedId, "ft_balance_of", { account_id: accountId }),
+      ]),
+    );
+    for (let i = 0; i < holderViews.length; i += 5) {
+      assert.ok(holderViews[i]);
+      assert.ok(holderViews[i + 1]);
+      assert.ok(holderViews[i + 2]);
+      assert.equal(holderViews[i + 3], FUND.toString());
+      assert.equal(holderViews[i + 4], FUND.toString());
     }
-    assert.ok(await view(poolId, "storage_balance_of", { account_id: poolId }));
-    assert.ok(await view(rebasingId, "storage_balance_of", { account_id: poolId }));
-    assert.ok(await view(taxedId, "storage_balance_of", { account_id: poolId }));
+    const poolRegs = await Promise.all([
+      view(poolId, "storage_balance_of", { account_id: poolId }),
+      view(rebasingId, "storage_balance_of", { account_id: poolId }),
+      view(taxedId, "storage_balance_of", { account_id: poolId }),
+    ]);
+    for (const reg of poolRegs) assert.ok(reg);
   });
 
   // origin: test_depositMintsSharesAndLocksTheMinimum.
@@ -381,14 +386,20 @@ describe("W2 flows", { concurrency: 1 }, () => {
       min_shares: "0",
     }, { gas: 300, deposit: "1" });
 
-    assert.deepEqual(await view(poolId, "get_deposits", { account_id: aliceId }), ["0", "0"]);
-    const shares = BigInt(await view(poolId, "ft_balance_of", { account_id: aliceId }));
-    const supply = BigInt(await view(poolId, "ft_total_supply"));
+    const [depsAfter, sharesRaw, supplyRaw, reservesRaw] = await Promise.all([
+      view(poolId, "get_deposits", { account_id: aliceId }),
+      view(poolId, "ft_balance_of", { account_id: aliceId }),
+      view(poolId, "ft_total_supply"),
+      view(poolId, "get_reserves"),
+    ]);
+    assert.deepEqual(depsAfter, ["0", "0"]);
+    const shares = BigInt(sharesRaw);
+    const supply = BigInt(supplyRaw);
     assert.equal(supply, SEED);
     assert.equal(shares, SEED - 1_000n, "MINIMUM_SHARES must be locked to the pool");
     assert.ok(supply > shares);
 
-    const [reserveA, reserveB] = (await view(poolId, "get_reserves")).map(BigInt);
+    const [reserveA, reserveB] = reservesRaw.map(BigInt);
     assert.equal(reserveA, SEED);
     assert.equal(reserveB, SEED);
 
@@ -419,8 +430,12 @@ describe("W2 flows", { concurrency: 1 }, () => {
   // origin: test_aTaxedOutputSettlesAtWhatActuallyArrived.
   test("a swap pays the output token and emits Swap", async () => {
     const amountIn = 10n * E18;
-    const reservesBefore = (await view(poolId, "get_reserves")).map(BigInt);
-    const balanceBefore = BigInt(await view(taxedId, "ft_balance_of", { account_id: aliceId }));
+    const [preReservesRaw, balanceBeforeRaw] = await Promise.all([
+      view(poolId, "get_reserves"),
+      view(taxedId, "ft_balance_of", { account_id: aliceId }),
+    ]);
+    const preReserves = preReservesRaw.map(BigInt);
+    const balanceBefore = BigInt(balanceBeforeRaw);
 
     const outcome = await callRaw(alice, rebasingId, "ft_transfer_call", {
       receiver_id: poolId,
@@ -429,15 +444,19 @@ describe("W2 flows", { concurrency: 1 }, () => {
     }, { gas: 200, deposit: "1" });
 
     const afterFee = amountIn * 9_970n;
-    const expectedOut = (afterFee * reservesBefore[1]) / (reservesBefore[0] * 10_000n + afterFee);
+    const expectedOut = (afterFee * preReserves[1]) / (preReserves[0] * 10_000n + afterFee);
 
-    const balanceAfter = BigInt(await view(taxedId, "ft_balance_of", { account_id: aliceId }));
+    const [balanceAfterRaw, postReservesRaw] = await Promise.all([
+      view(taxedId, "ft_balance_of", { account_id: aliceId }),
+      view(poolId, "get_reserves"),
+    ]);
+    const balanceAfter = BigInt(balanceAfterRaw);
     assert.equal(balanceAfter - balanceBefore, expectedOut);
 
-    const reservesAfter = (await view(poolId, "get_reserves")).map(BigInt);
-    assert.equal(reservesAfter[0], reservesBefore[0] + amountIn);
-    assert.equal(reservesAfter[1], reservesBefore[1] - expectedOut);
-    assert.ok(reservesAfter[1] < reservesBefore[1]);
+    const postReserves = postReservesRaw.map(BigInt);
+    assert.equal(postReserves[0], preReserves[0] + amountIn);
+    assert.equal(postReserves[1], preReserves[1] - expectedOut);
+    assert.ok(postReserves[1] < preReserves[1]);
 
     const swapEvent = eventsOf(outcome).find(
       (event) => event.standard === "krater" && event.event === "swap",
@@ -451,21 +470,22 @@ describe("W2 flows", { concurrency: 1 }, () => {
 
   // origin: test_aPositiveRebaseIncreasesTheReserves.
   test("a rebase is priced after sync_reserves", async () => {
-    const reservesBefore = (await view(poolId, "get_reserves")).map(BigInt);
-    const quoteBefore = BigInt(await view(poolId, "get_quote", {
-      token_in: taxedId,
-      amount_in: E18.toString(),
-    }));
+    const [preReservesRaw, quoteBeforeRaw] = await Promise.all([
+      view(poolId, "get_reserves"),
+      view(poolId, "get_quote", { token_in: taxedId, amount_in: E18.toString() }),
+    ]);
+    const preReserves = preReservesRaw.map(BigInt);
+    const quoteBefore = BigInt(quoteBeforeRaw);
 
     await call(bob, rebasingId, "rebase", { factor_bps: 11_000 }, { gas: 30 });
     const syncOutcome = await callRaw(bob, poolId, "sync_reserves", {}, { gas: 100 });
 
     const reservesAfter = (await view(poolId, "get_reserves")).map(BigInt);
-    const expectedA = (reservesBefore[0] * 11_000n) / 10_000n;
+    const expectedA = (preReserves[0] * 11_000n) / 10_000n;
     const delta = reservesAfter[0] > expectedA
       ? reservesAfter[0] - expectedA
       : expectedA - reservesAfter[0];
-    assert.ok(reservesAfter[0] > reservesBefore[0], "rebase did not grow reserve A");
+    assert.ok(reservesAfter[0] > preReserves[0], "rebase did not grow reserve A");
     assert.ok(delta <= 1n, `reserve A moved by more than one base unit: ${delta}`);
 
     const quoteAfter = BigInt(await view(poolId, "get_quote", {
@@ -485,18 +505,28 @@ describe("W2 flows", { concurrency: 1 }, () => {
 
   // origin: test_withdrawReturnsBothSides / test_aRebaseIsWorthMoreToEveryShare.
   test("withdraw pays both legs and burns shares", async () => {
-    const sharesBefore = BigInt(await view(poolId, "ft_balance_of", { account_id: aliceId }));
+    const [sharesBeforeRaw, aBeforeRaw, bBeforeRaw] = await Promise.all([
+      view(poolId, "ft_balance_of", { account_id: aliceId }),
+      view(rebasingId, "ft_balance_of", { account_id: aliceId }),
+      view(taxedId, "ft_balance_of", { account_id: aliceId }),
+    ]);
+    const sharesBefore = BigInt(sharesBeforeRaw);
     const half = sharesBefore / 2n;
-    const aBefore = BigInt(await view(rebasingId, "ft_balance_of", { account_id: aliceId }));
-    const bBefore = BigInt(await view(taxedId, "ft_balance_of", { account_id: aliceId }));
+    const aBefore = BigInt(aBeforeRaw);
+    const bBefore = BigInt(bBeforeRaw);
 
     const outcome = await callRaw(alice, poolId, "withdraw", { shares: half.toString() },
       { gas: 300, deposit: "1" });
 
-    const sharesAfter = BigInt(await view(poolId, "ft_balance_of", { account_id: aliceId }));
+    const [sharesAfterRaw, aAfterRaw, bAfterRaw] = await Promise.all([
+      view(poolId, "ft_balance_of", { account_id: aliceId }),
+      view(rebasingId, "ft_balance_of", { account_id: aliceId }),
+      view(taxedId, "ft_balance_of", { account_id: aliceId }),
+    ]);
+    const sharesAfter = BigInt(sharesAfterRaw);
     assert.equal(sharesAfter, sharesBefore - half);
-    assert.ok(BigInt(await view(rebasingId, "ft_balance_of", { account_id: aliceId })) > aBefore);
-    assert.ok(BigInt(await view(taxedId, "ft_balance_of", { account_id: aliceId })) > bBefore);
+    assert.ok(BigInt(aAfterRaw) > aBefore);
+    assert.ok(BigInt(bAfterRaw) > bBefore);
 
     const events = eventsOf(outcome);
     // NEP-141 emits `data` as an array of records; the pool's own events use a
@@ -565,8 +595,12 @@ describe("W2 flows", { concurrency: 1 }, () => {
     await call(carol, rebasingId, "storage_deposit", {}, { deposit: storage, gas: 30 });
     await call(carol, taxedId, "storage_deposit", {}, { deposit: storage, gas: 30 });
 
-    const aBefore = BigInt(await view(rebasingId, "ft_balance_of", { account_id: carolId }));
-    const bBefore = BigInt(await view(taxedId, "ft_balance_of", { account_id: carolId }));
+    const [aBeforeRaw, bBeforeRaw] = await Promise.all([
+      view(rebasingId, "ft_balance_of", { account_id: carolId }),
+      view(taxedId, "ft_balance_of", { account_id: carolId }),
+    ]);
+    const aBefore = BigInt(aBeforeRaw);
+    const bBefore = BigInt(bBeforeRaw);
     await call(carol, poolId, "claim_owed", { token: rebasingId }, { gas: 100, deposit: "1" });
     await call(carol, poolId, "claim_owed", { token: taxedId }, { gas: 100, deposit: "1" });
 
@@ -592,9 +626,13 @@ describe("W2 flows", { concurrency: 1 }, () => {
     // Token B keeps index ONE, so the fixture's floor-rounded refund shares
     // exactly equal the shares it took; the rebasing token would leave a
     // one-base-unit rounding residue in the pool.
-    const aliceBefore = BigInt(await view(taxedId, "ft_balance_of", { account_id: aliceId }));
-    const poolBefore = BigInt(await view(taxedId, "ft_balance_of", { account_id: poolId }));
-    const reservesBefore = await view(poolId, "get_reserves");
+    const [aliceBeforeRaw, poolBeforeRaw, preReserves] = await Promise.all([
+      view(taxedId, "ft_balance_of", { account_id: aliceId }),
+      view(taxedId, "ft_balance_of", { account_id: poolId }),
+      view(poolId, "get_reserves"),
+    ]);
+    const aliceBefore = BigInt(aliceBeforeRaw);
+    const poolBefore = BigInt(poolBeforeRaw);
 
     const outcome = await callRaw(alice, taxedId, "ft_transfer_call", {
       receiver_id: poolId,
@@ -602,15 +640,14 @@ describe("W2 flows", { concurrency: 1 }, () => {
       msg: JSON.stringify({ ExactOutput: { amount_out: "1" } }),
     }, { gas: 200, deposit: "1" });
 
-    assert.equal(
-      BigInt(await view(taxedId, "ft_balance_of", { account_id: aliceId })),
-      aliceBefore,
-    );
-    assert.equal(
-      BigInt(await view(taxedId, "ft_balance_of", { account_id: poolId })),
-      poolBefore,
-    );
-    assert.deepEqual(await view(poolId, "get_reserves"), reservesBefore);
+    const [aliceAfterRaw, poolAfterRaw, reservesAfter] = await Promise.all([
+      view(taxedId, "ft_balance_of", { account_id: aliceId }),
+      view(taxedId, "ft_balance_of", { account_id: poolId }),
+      view(poolId, "get_reserves"),
+    ]);
+    assert.equal(BigInt(aliceAfterRaw), aliceBefore);
+    assert.equal(BigInt(poolAfterRaw), poolBefore);
+    assert.deepEqual(reservesAfter, preReserves);
     assert.ok(
       !eventsOf(outcome).some(
         (event) => event.standard === "krater" && event.event === "swap",
@@ -647,8 +684,11 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
   test("swap with an unmet min_out refunds the input and does not move reserves", async () => {
     const amount = E18;
     await call(bob, poolId, "sync_reserves", {}, { gas: 100 });
-    const reservesBefore = await view(poolId, "get_reserves");
-    const aliceBefore = BigInt(await view(taxedId, "ft_balance_of", { account_id: aliceId }));
+    const [preReserves, aliceBeforeRaw] = await Promise.all([
+      view(poolId, "get_reserves"),
+      view(taxedId, "ft_balance_of", { account_id: aliceId }),
+    ]);
+    const aliceBefore = BigInt(aliceBeforeRaw);
 
     // Token B has index ONE and no tax here, so both legs are exact.
     const outcome = await callRaw(alice, taxedId, "ft_transfer_call", {
@@ -657,13 +697,13 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
       msg: JSON.stringify({ Swap: { min_out: (100n * E18).toString() } }),
     }, { gas: 200, deposit: "1" });
 
-    assert.equal(
-      BigInt(await view(taxedId, "ft_balance_of", { account_id: aliceId })),
-      aliceBefore,
-      "a min_out miss must return the whole input",
-    );
-    assert.deepEqual(await view(poolId, "get_reserves"), reservesBefore);
-    const refunds = ftTransfersOf(outcome).filter(
+    const [aliceAfterRaw, postReserves] = await Promise.all([
+      view(taxedId, "ft_balance_of", { account_id: aliceId }),
+      view(poolId, "get_reserves"),
+    ]);
+    assert.equal(BigInt(aliceAfterRaw), aliceBefore, "a min_out miss must return the whole input");
+    assert.deepEqual(postReserves, preReserves);
+    const refunds = ftTransfers(outcome).filter(
       (transfer) => transfer.new_owner_id === aliceId,
     );
     assert.ok(refunds.length >= 1, "the pool must emit the refund transfer");
@@ -696,8 +736,11 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
       "the chosen direction quotes zero for one base unit",
     );
 
-    const reservesBefore = await view(poolId, "get_reserves");
-    const aliceBefore = BigInt(await view(tokenIn, "ft_balance_of", { account_id: aliceId }));
+    const [preReserves, aliceBeforeRaw] = await Promise.all([
+      view(poolId, "get_reserves"),
+      view(tokenIn, "ft_balance_of", { account_id: aliceId }),
+    ]);
+    const aliceBefore = BigInt(aliceBeforeRaw);
 
     const outcome = await callRaw(alice, tokenIn, "ft_transfer_call", {
       receiver_id: poolId,
@@ -705,13 +748,13 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
       msg: JSON.stringify({ Swap: { min_out: "0" } }),
     }, { gas: 200, deposit: "1" });
 
-    assert.equal(
-      BigInt(await view(tokenIn, "ft_balance_of", { account_id: aliceId })),
-      aliceBefore,
-      "dust input must be refunded",
-    );
-    assert.deepEqual(await view(poolId, "get_reserves"), reservesBefore);
-    const transfers = ftTransfersOf(outcome);
+    const [aliceAfterRaw, postReserves] = await Promise.all([
+      view(tokenIn, "ft_balance_of", { account_id: aliceId }),
+      view(poolId, "get_reserves"),
+    ]);
+    assert.equal(BigInt(aliceAfterRaw), aliceBefore, "dust input must be refunded");
+    assert.deepEqual(postReserves, preReserves);
+    const transfers = ftTransfers(outcome);
     assert.ok(
       !transfers.some((transfer) => BigInt(transfer.amount) === 0n),
       "a zero-amount ft_transfer panics the reference FT",
@@ -744,8 +787,12 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
     );
 
     await call(bob, poolId, "sync_reserves", {}, { gas: 100 });
-    const reservesBefore = (await view(poolId, "get_reserves")).map(BigInt);
-    const inputBefore = BigInt(await view(taxedId, "ft_balance_of", { account_id: aliceId }));
+    const [preReservesRaw, inputBeforeRaw] = await Promise.all([
+      view(poolId, "get_reserves"),
+      view(taxedId, "ft_balance_of", { account_id: aliceId }),
+    ]);
+    const preReserves = preReservesRaw.map(BigInt);
+    const inputBefore = BigInt(inputBeforeRaw);
     const amount = E18;
 
     const outcome = await callRaw(alice, taxedId, "ft_transfer_call", {
@@ -760,21 +807,14 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
       ),
       "a failed payout must not emit Swap",
     );
-    assert.equal(
-      BigInt(await view(taxedId, "ft_balance_of", { account_id: aliceId })),
-      inputBefore,
-      "a failed output leg refunds the whole input",
-    );
-    assert.deepEqual(
-      (await view(poolId, "get_reserves")).map(BigInt),
-      reservesBefore,
-      "a failed output leg restores both cached reserves",
-    );
-    assert.deepEqual(
-      (await view(poolId, "get_payout_backlog", { account_id: aliceId })).map(BigInt),
-      [0n, 0n],
-      "the refund is immediate; the failure leaves no payout debt",
-    );
+    const [inputAfterRaw, postReservesRaw, backlogRaw] = await Promise.all([
+      view(taxedId, "ft_balance_of", { account_id: aliceId }),
+      view(poolId, "get_reserves"),
+      view(poolId, "get_payout_backlog", { account_id: aliceId }),
+    ]);
+    assert.equal(BigInt(inputAfterRaw), inputBefore, "a failed output leg refunds the whole input");
+    assert.deepEqual(postReservesRaw.map(BigInt), preReserves, "a failed output leg restores both cached reserves");
+    assert.deepEqual(backlogRaw.map(BigInt), [0n, 0n], "the refund is immediate; the failure leaves no payout debt");
 
     await call(alice, rebasingId, "storage_deposit", {}, {
       deposit: toYocto("0.02"),
@@ -786,19 +826,26 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
   test("busy swap is refunded", async () => {
     // Self-contained: the forced-output test may have unregistered a sender, so
     // re-register both on both tokens before racing the two swaps.
-    for (const account of [alice, bob]) {
-      for (const tokenId of [rebasingId, taxedId]) {
-        await call(account, tokenId, "storage_deposit", {}, {
-          deposit: toYocto("0.02"),
-          gas: 30,
-        });
-      }
-    }
+    await Promise.all(
+      [alice, bob].map(async (account) => {
+        for (const tokenId of [rebasingId, taxedId]) {
+          await call(account, tokenId, "storage_deposit", {}, {
+            deposit: toYocto("0.02"),
+            gas: 30,
+          });
+        }
+      }),
+    );
     await call(bob, poolId, "sync_reserves", {}, { gas: 100 });
     const amount = E18 / 2n;
-    const aliceBefore = BigInt(await view(taxedId, "ft_balance_of", { account_id: aliceId }));
-    const bobBefore = BigInt(await view(taxedId, "ft_balance_of", { account_id: bobId }));
-    const poolBefore = BigInt(await view(taxedId, "ft_balance_of", { account_id: poolId }));
+    const [aliceBeforeRaw, bobBeforeRaw, poolBeforeRaw] = await Promise.all([
+      view(taxedId, "ft_balance_of", { account_id: aliceId }),
+      view(taxedId, "ft_balance_of", { account_id: bobId }),
+      view(taxedId, "ft_balance_of", { account_id: poolId }),
+    ]);
+    const aliceBefore = BigInt(aliceBeforeRaw);
+    const bobBefore = BigInt(bobBeforeRaw);
+    const poolBefore = BigInt(poolBeforeRaw);
 
     // Both transactions are broadcast before either is awaited, so the second
     // ft_on_transfer can land while the first sync chain is pending. The sandbox
@@ -826,46 +873,31 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
     // Zero fills is a valid busy-window outcome: both transfers see the slot and
     // are refunded in full. The invariant assertions below hold either way.
     const executedIn = swaps.reduce((sum, event) => sum + BigInt(event.data.amount_in), 0n);
-    const executedOut = swaps.reduce(
-      (sum, event) => sum + BigInt(event.data.amount_out_gross),
-      0n,
-    );
     const aliceSwaps = swaps.filter((event) => event.data.sender === aliceId).length;
     const bobSwaps = swaps.filter((event) => event.data.sender === bobId).length;
     assert.ok(aliceSwaps <= 1 && bobSwaps <= 1, "a sender can fill at most one swap");
 
-    assert.equal(
-      BigInt(await view(taxedId, "ft_balance_of", { account_id: poolId })),
-      poolBefore + executedIn,
-      "the pool keeps the executed inputs only",
-    );
-    assert.equal(
-      BigInt(await view(taxedId, "ft_balance_of", { account_id: aliceId })),
-      aliceBefore - BigInt(aliceSwaps) * amount,
-      "a refunded swap returns Alice's input in full",
-    );
-    assert.equal(
-      BigInt(await view(taxedId, "ft_balance_of", { account_id: bobId })),
-      bobBefore - BigInt(bobSwaps) * amount,
-      "a refunded swap returns Bob's input in full",
-    );
+    const [poolAfterRaw, aliceAfterRaw, bobAfterRaw] = await Promise.all([
+      view(taxedId, "ft_balance_of", { account_id: poolId }),
+      view(taxedId, "ft_balance_of", { account_id: aliceId }),
+      view(taxedId, "ft_balance_of", { account_id: bobId }),
+    ]);
+    assert.equal(BigInt(poolAfterRaw), poolBefore + executedIn, "the pool keeps the executed inputs only");
+    assert.equal(BigInt(aliceAfterRaw), aliceBefore - BigInt(aliceSwaps) * amount, "a refunded swap returns Alice's input in full");
+    assert.equal(BigInt(bobAfterRaw), bobBefore - BigInt(bobSwaps) * amount, "a refunded swap returns Bob's input in full");
     // The cache is not authoritative under two concurrent swaps: each sync writes
     // it from its own snapshot. Assert instead that it agrees with a fresh sync.
     await call(bob, poolId, "sync_reserves", {}, { gas: 100 });
-    const cacheAfterFirstSync = (await view(poolId, "get_reserves")).map(BigInt);
+    const syncReserves1 = (await view(poolId, "get_reserves")).map(BigInt);
     await call(bob, poolId, "sync_reserves", {}, { gas: 100 });
-    const cacheAfterSecondSync = (await view(poolId, "get_reserves")).map(BigInt);
-    assert.deepEqual(
-      cacheAfterFirstSync,
-      cacheAfterSecondSync,
-      "the cached reserves equal a fresh sync",
-    );
+    const syncReserves2 = (await view(poolId, "get_reserves")).map(BigInt);
+    assert.deepEqual(syncReserves1, syncReserves2, "the cached reserves equal a fresh sync");
 
     for (const [senderId, outcome, filled] of [
       [aliceId, aliceOutcome, aliceSwaps],
       [bobId, bobOutcome, bobSwaps],
     ]) {
-      const refunds = ftTransfersOf(outcome).filter(
+      const refunds = ftTransfers(outcome).filter(
         (transfer) =>
           transfer.new_owner_id === senderId && BigInt(transfer.amount) === amount,
       );
@@ -881,12 +913,12 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
 
   // origin: new row `add_liquidity with insufficient credits fails`.
   test("add_liquidity with insufficient credits fails and leaves credits intact", async () => {
-    const depositOutcome = await callRaw(dave, rebasingId, "ft_transfer_call", {
+    const depOutcome = await callRaw(dave, rebasingId, "ft_transfer_call", {
       receiver_id: poolId,
       amount: (5n * E18).toString(),
       msg: "",
     }, { gas: 200, deposit: "1" });
-    assert.ok(kraterEventOf(depositOutcome, "credit_added"), "the deposit must be credited");
+    assert.ok(poolEvent(depOutcome, "credit_added"), "the deposit must be credited");
 
     const [creditA] = (await view(poolId, "get_deposits", { account_id: daveId })).map(BigInt);
     assert.ok(creditA > 0n);
@@ -896,7 +928,7 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
       min_shares: "0",
     }, { gas: 300, deposit: "1" });
 
-    const failed = kraterEventOf(outcome, "add_liquidity_failed");
+    const failed = poolEvent(outcome, "add_liquidity_failed");
     assert.ok(failed, "the add must report why it could not mint");
     assert.equal(failed.data.reason, "InsufficientDeposit");
     assert.deepEqual(
@@ -924,8 +956,7 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
       min_shares: (1_000n * E18).toString(),
     }, { gas: 300, deposit: "1" });
 
-    const failed = kraterEventOf(outcome, "add_liquidity_failed");
-    assert.ok(failed, "the add must report the missed floor");
+    const failed = poolEvent(outcome, "add_liquidity_failed");
     assert.equal(failed.data.reason, "MinSharesNotMet");
     assert.deepEqual(
       (await view(poolId, "get_deposits", { account_id: daveId })).map(BigInt),
@@ -958,13 +989,12 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
       receiver_id: daveId,
       amount: amount.toString(),
     }, { gas: 30 });
-    const depositOutcome = await callRaw(dave, taxedId, "ft_transfer_call", {
+    const depOutcome = await callRaw(dave, taxedId, "ft_transfer_call", {
       receiver_id: poolId,
       amount: amount.toString(),
       msg: "",
     }, { gas: 200, deposit: "1" });
-    assert.ok(kraterEventOf(depositOutcome, "credit_added"));
-
+    assert.ok(poolEvent(depOutcome, "credit_added"));
     const credits = (await view(poolId, "get_deposits", { account_id: daveId })).map(BigInt);
     assert.equal(credits[1], amount);
 
@@ -983,8 +1013,7 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
       token: taxedId,
       amount: amount.toString(),
     }, { gas: 100, deposit: "1" });
-    assert.ok(kraterEventOf(outcome, "credit_withdrawn"), "the debit must be reported");
-
+    assert.ok(poolEvent(outcome, "credit_withdrawn"), "the debit must be reported");
     assert.deepEqual(
       (await view(poolId, "get_deposits", { account_id: daveId })).map(BigInt),
       credits,
@@ -1045,34 +1074,34 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
     }
     await call(dave, rebasingId, "storage_unregister", {}, { gas: 30, deposit: "1" });
 
-    const withdrawOutcome = await callFailedLeg(dave, poolId, "withdraw", {
+    const exitOutcome = await callFailedLeg(dave, poolId, "withdraw", {
       shares: shares.toString(),
     }, { gas: 300, deposit: "1" });
-    const withdrawEvent = kraterEventOf(withdrawOutcome, "withdraw");
+    const withdrawEvent = poolEvent(exitOutcome, "withdraw");
     assert.ok(withdrawEvent, "the withdrawal settles before the leg fails");
     const owedA = BigInt(withdrawEvent.data.amount_a);
     assert.ok(owedA > 0n, "the A leg must have a non-zero amount");
-    assert.equal(
-      BigInt(await view(poolId, "ft_balance_of", { account_id: daveId })),
-      0n,
-      "the shares must burn even when the payout leg fails",
-    );
-    let backlog = (await view(poolId, "get_payout_backlog", { account_id: daveId })).map(BigInt);
+    const [daveSharesRaw, backlogRaw, claimReservesRaw] = await Promise.all([
+      view(poolId, "ft_balance_of", { account_id: daveId }),
+      view(poolId, "get_payout_backlog", { account_id: daveId }),
+      view(poolId, "get_reserves"),
+    ]);
+    assert.equal(BigInt(daveSharesRaw), 0n, "the shares must burn even when the payout leg fails");
+    let backlog = backlogRaw.map(BigInt);
     assert.equal(backlog[0], owedA);
-    const reservesBeforeClaim = (await view(poolId, "get_reserves")).map(BigInt);
-
+    const claimReserves = claimReservesRaw.map(BigInt);
     // Claim while the payout token is still refused: the callback must put the
     // owed amount and its reserve back.
     await callFailedLeg(dave, poolId, "claim_owed", {
       token: rebasingId,
     }, { gas: 100, deposit: "1" });
-    backlog = (await view(poolId, "get_payout_backlog", { account_id: daveId })).map(BigInt);
+    const [backlog2Raw, reservesAfterClaimRaw] = await Promise.all([
+      view(poolId, "get_payout_backlog", { account_id: daveId }),
+      view(poolId, "get_reserves"),
+    ]);
+    backlog = backlog2Raw.map(BigInt);
     assert.equal(backlog[0], owedA, "a failed claim must restore the backed amount");
-    assert.deepEqual(
-      (await view(poolId, "get_reserves")).map(BigInt),
-      reservesBeforeClaim,
-      "a failed claim must restore the reserve it debited",
-    );
+    assert.deepEqual(reservesAfterClaimRaw.map(BigInt), claimReserves, "a failed claim must restore the reserve it debited");
 
     await call(dave, rebasingId, "storage_deposit", {}, {
       deposit: toYocto("0.02"),
@@ -1129,8 +1158,11 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
   // `min_credit_deposit = 10^(decimals-3)` rule.
   test("short deposit is refunded", async () => {
     const short = 10n ** 12n; // below 10^(18-3) = 1e15 base units
-    const balanceBefore = BigInt(await view(taxedId, "ft_balance_of", { account_id: aliceId }));
-    const depositsBefore = await view(poolId, "get_deposits", { account_id: aliceId });
+    const [balanceBeforeRaw, preDeposits] = await Promise.all([
+      view(taxedId, "ft_balance_of", { account_id: aliceId }),
+      view(poolId, "get_deposits", { account_id: aliceId }),
+    ]);
+    const balanceBefore = BigInt(balanceBeforeRaw);
 
     const outcome = await callRaw(alice, taxedId, "ft_transfer_call", {
       receiver_id: poolId,
@@ -1138,14 +1170,18 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
       msg: "",
     }, { gas: 200, deposit: "1" });
 
+    const [balanceAfterRaw, depsAfter] = await Promise.all([
+      view(taxedId, "ft_balance_of", { account_id: aliceId }),
+      view(poolId, "get_deposits", { account_id: aliceId }),
+    ]);
     assert.equal(
-      BigInt(await view(taxedId, "ft_balance_of", { account_id: aliceId })),
+      BigInt(balanceAfterRaw),
       balanceBefore,
       "a below-floor deposit must be refunded in full",
     );
     assert.deepEqual(
-      await view(poolId, "get_deposits", { account_id: aliceId }),
-      depositsBefore,
+      depsAfter,
+      preDeposits,
       "a below-floor deposit must not create a credit",
     );
     assert.ok(
@@ -1165,38 +1201,39 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
       receiver_id: daveId,
       amount: FUND.toString(),
     }, { gas: 30 });
-    const tax = BigInt(TRANSFER_TAX_BPS);
+    const tax = BigInt(TAX_BPS);
     const net = gross - (gross * tax) / 10_000n;
-    await call(dave, taxedId, "set_fee", { bps: TRANSFER_TAX_BPS }, { gas: 30 });
+    await call(dave, taxedId, "set_fee", { bps: TAX_BPS }, { gas: 30 });
     try {
-      const depositsBefore = (await view(poolId, "get_deposits", { account_id: daveId }))
-        .map(BigInt);
-      const walletBefore = BigInt(await view(taxedId, "ft_balance_of", { account_id: daveId }));
-      const poolBefore = BigInt(await view(taxedId, "ft_balance_of", { account_id: poolId }));
+      const [preDepsRaw, walletBeforeRaw, poolBeforeRaw] = await Promise.all([
+        view(poolId, "get_deposits", { account_id: daveId }),
+        view(taxedId, "ft_balance_of", { account_id: daveId }),
+        view(taxedId, "ft_balance_of", { account_id: poolId }),
+      ]);
+      const preDeposits = preDepsRaw.map(BigInt);
+      const walletBefore = BigInt(walletBeforeRaw);
+      const poolBefore = BigInt(poolBeforeRaw);
 
-      const depositOutcome = await callRaw(dave, taxedId, "ft_transfer_call", {
+      const depOutcome = await callRaw(dave, taxedId, "ft_transfer_call", {
         receiver_id: poolId,
         amount: gross.toString(),
         msg: "",
       }, { gas: 200, deposit: "1" });
-      const added = kraterEventOf(depositOutcome, "credit_added");
+      const added = poolEvent(depOutcome, "credit_added");
       assert.ok(added, "the taxed deposit is still credited");
       assert.equal(added.data.amount, net.toString(), "the credit is the net receipt");
-      assert.equal(
-        BigInt(await view(taxedId, "ft_balance_of", { account_id: daveId })),
-        walletBefore - gross,
-        "the sender pays the gross amount",
-      );
-      assert.equal(
-        BigInt(await view(taxedId, "ft_balance_of", { account_id: poolId })),
-        poolBefore + net,
-        "the pool receives the net amount",
-      );
-      const credited = (await view(poolId, "get_deposits", { account_id: daveId })).map(BigInt);
-      assert.equal(credited[1] - depositsBefore[1], net);
+      const [walletAfterRaw, poolAfterRaw, creditedRaw] = await Promise.all([
+        view(taxedId, "ft_balance_of", { account_id: daveId }),
+        view(taxedId, "ft_balance_of", { account_id: poolId }),
+        view(poolId, "get_deposits", { account_id: daveId }),
+      ]);
+      assert.equal(BigInt(walletAfterRaw), walletBefore - gross, "the sender pays the gross amount");
+      assert.equal(BigInt(poolAfterRaw), poolBefore + net, "the pool receives the net amount");
+      const credited = creditedRaw.map(BigInt);
+      assert.equal(credited[1] - preDeposits[1], net);
 
       await call(bob, poolId, "sync_reserves", {}, { gas: 100 });
-      const reservesBefore = (await view(poolId, "get_reserves")).map(BigInt);
+      const preReserves = (await view(poolId, "get_reserves")).map(BigInt);
       const grossSwap = 5n * E18;
       const netSwap = grossSwap - (grossSwap * tax) / 10_000n;
       const swapOutcome = await callRaw(dave, taxedId, "ft_transfer_call", {
@@ -1204,16 +1241,16 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
         amount: grossSwap.toString(),
         msg: JSON.stringify({ Swap: { min_out: "0" } }),
       }, { gas: 200, deposit: "1" });
-      const swapEvent = kraterEventOf(swapOutcome, "swap");
+      const swapEvent = poolEvent(swapOutcome, "swap");
       assert.ok(swapEvent, "the taxed swap fills");
       assert.equal(swapEvent.data.amount_in, netSwap.toString(), "the quote uses the net");
-      const reservesAfter = (await view(poolId, "get_reserves")).map(BigInt);
+      const postReserves = (await view(poolId, "get_reserves")).map(BigInt);
       assert.equal(
-        reservesAfter[1],
-        reservesBefore[1] + netSwap,
+        postReserves[1],
+        preReserves[1] + netSwap,
         "the input reserve grows by the net, not the gross",
       );
-      assert.notEqual(reservesAfter[1], reservesBefore[1] + grossSwap);
+      assert.notEqual(postReserves[1], preReserves[1] + grossSwap);
     } finally {
       await call(dave, taxedId, "set_fee", { bps: 0 }, { gas: 30 });
     }
@@ -1225,8 +1262,10 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
 
   // origin: predecessor allowlist (auth row in the W3 doc).
   test("non-token predecessor is refused", async () => {
-    const depositsBefore = await view(poolId, "get_deposits", { account_id: bobId });
-    const reservesBefore = await view(poolId, "get_reserves");
+    const [preDeposits, preReserves] = await Promise.all([
+      view(poolId, "get_deposits", { account_id: bobId }),
+      view(poolId, "get_reserves"),
+    ]);
 
     const outcome = await callRaw(alice, poolId, "ft_on_transfer", {
       sender_id: bobId,
@@ -1234,17 +1273,13 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
       msg: "",
     }, { gas: 60, deposit: "0" });
 
+    const [depsAfter, reservesAfter] = await Promise.all([
+      view(poolId, "get_deposits", { account_id: bobId }),
+      view(poolId, "get_reserves"),
+    ]);
     assert.equal(successValue(outcome), "1000", "an unknown predecessor refunds the amount");
-    assert.deepEqual(
-      await view(poolId, "get_deposits", { account_id: bobId }),
-      depositsBefore,
-      "a direct call must not mint a credit",
-    );
-    assert.deepEqual(
-      await view(poolId, "get_reserves"),
-      reservesBefore,
-      "a direct call must not move the cache",
-    );
+    assert.deepEqual(depsAfter, preDeposits, "a direct call must not mint a credit");
+    assert.deepEqual(reservesAfter, preReserves, "a direct call must not move the cache");
   });
 
   // origin: new row `a swap never pays out credited deposits` (RK11/audit-2).
@@ -1262,47 +1297,45 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
     assert.equal(daveCredits[1], credit);
 
     await call(bob, poolId, "sync_reserves", {}, { gas: 100 });
-    const reservesBefore = (await view(poolId, "get_reserves")).map(BigInt);
-    const poolBefore = BigInt(await view(taxedId, "ft_balance_of", { account_id: poolId }));
+    const [preReservesRaw, poolBeforeRaw, bobBeforeRaw] = await Promise.all([
+      view(poolId, "get_reserves"),
+      view(taxedId, "ft_balance_of", { account_id: poolId }),
+      view(taxedId, "ft_balance_of", { account_id: bobId }),
+    ]);
+    const preReserves = preReservesRaw.map(BigInt);
+    const poolBefore = BigInt(poolBeforeRaw);
     assert.equal(
-      reservesBefore[1],
+      preReserves[1],
       poolBefore - credit,
       "the cached reserve must exclude the credited deposit",
     );
 
-    const bobBefore = BigInt(await view(taxedId, "ft_balance_of", { account_id: bobId }));
+    const bobBefore = BigInt(bobBeforeRaw);
     const swapOutcome = await callRaw(bob, rebasingId, "ft_transfer_call", {
       receiver_id: poolId,
       amount: E18.toString(),
       msg: JSON.stringify({ Swap: { min_out: "0" } }),
     }, { gas: 200, deposit: "1" });
-    const swapEvent = kraterEventOf(swapOutcome, "swap");
+    const swapEvent = poolEvent(swapOutcome, "swap");
     assert.ok(swapEvent, "the swap fills");
     const amountIn = BigInt(swapEvent.data.amount_in);
     const amountOut = BigInt(swapEvent.data.amount_out_gross);
     assert.ok(amountOut > 0n);
 
-    const reservesAfter = (await view(poolId, "get_reserves")).map(BigInt);
+    const [postReservesRaw, poolAfterRaw, bobAfterRaw, daveDepsAfterRaw] = await Promise.all([
+      view(poolId, "get_reserves"),
+      view(taxedId, "ft_balance_of", { account_id: poolId }),
+      view(taxedId, "ft_balance_of", { account_id: bobId }),
+      view(poolId, "get_deposits", { account_id: daveId }),
+    ]);
+    const postReserves = postReservesRaw.map(BigInt);
     // Index-scaled fixture shares round by at most one base unit.
     const near = (actual, expected) => actual >= expected - 1n && actual <= expected + 1n;
-    assert.ok(near(reservesAfter[0], reservesBefore[0] + amountIn), "input reserve");
-    assert.ok(near(reservesAfter[1], reservesBefore[1] - amountOut), "output reserve");
-    assert.ok(
-      near(
-        BigInt(await view(taxedId, "ft_balance_of", { account_id: poolId })),
-        reservesAfter[1] + credit,
-      ),
-      "the credited tokens stay fully backed after the swap",
-    );
-    assert.ok(
-      near(BigInt(await view(taxedId, "ft_balance_of", { account_id: bobId })) - bobBefore, amountOut),
-      "the trader receives the quoted output",
-    );
-    assert.deepEqual(
-      (await view(poolId, "get_deposits", { account_id: daveId })).map(BigInt),
-      daveCredits,
-      "the swap must not consume the credit",
-    );
+    assert.ok(near(postReserves[0], preReserves[0] + amountIn), "input reserve");
+    assert.ok(near(postReserves[1], preReserves[1] - amountOut), "output reserve");
+    assert.ok(near(BigInt(poolAfterRaw), postReserves[1] + credit), "the credited tokens stay fully backed after the swap");
+    assert.ok(near(BigInt(bobAfterRaw) - bobBefore, amountOut), "the trader receives the quoted output");
+    assert.deepEqual(daveDepsAfterRaw.map(BigInt), daveCredits, "the swap must not consume the credit");
 
     const daveBefore = BigInt(await view(taxedId, "ft_balance_of", { account_id: daveId }));
     await call(dave, poolId, "withdraw_deposit", {
@@ -1346,34 +1379,38 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
 
     await call(bob, rebasingId, "rebase", { factor_bps: 11_000 }, { gas: 30 });
     const syncOutcome = await callRaw(bob, poolId, "sync_reserves", {}, { gas: 100 });
-    assert.ok(kraterEventOf(syncOutcome, "reserves_synced"));
+    assert.ok(poolEvent(syncOutcome, "reserves_synced"));
 
-    const [creditA, creditB] = (await view(poolId, "get_deposits", { account_id: daveId }))
-      .map(BigInt);
+    const [credsRaw, reservesRaw, supplyRaw] = await Promise.all([
+      view(poolId, "get_deposits", { account_id: daveId }),
+      view(poolId, "get_reserves"),
+      view(poolId, "ft_total_supply"),
+    ]);
+    const [creditA, creditB] = credsRaw.map(BigInt);
     assert.ok(
       creditA > beforeRebase[0],
       "the credit must follow the rebase up instead of keeping its deposit nominal",
     );
     assert.equal(creditB, beforeRebase[1], "the non-rebasing leg is unchanged");
 
-    const [reserveA, reserveB] = (await view(poolId, "get_reserves")).map(BigInt);
-    const supply = BigInt(await view(poolId, "ft_total_supply"));
+    const [reserveA, reserveB] = reservesRaw.map(BigInt);
+    const supply = BigInt(supplyRaw);
     const shareValueA = (creditA * supply) / reserveA;
     const shareValueB = (creditB * supply) / reserveB;
     assert.ok(shareValueA < shareValueB, "the A side must bind for this vector");
-    const expectedShares = shareValueA;
+    const expShares = shareValueA;
     const staleShares = (beforeRebase[0] * supply) / reserveA;
     assert.ok(
-      expectedShares > staleShares,
+      expShares > staleShares,
       "minting from the pre-rebase credit would haircut the deposit",
     );
 
     const spentA = (() => {
-      const ceil = ceilDiv(expectedShares * reserveA, supply);
+      const ceil = ceilDiv(expShares * reserveA, supply);
       return ceil < creditA ? ceil : creditA;
     })();
     const spentB = (() => {
-      const ceil = ceilDiv(expectedShares * reserveB, supply);
+      const ceil = ceilDiv(expShares * reserveB, supply);
       return ceil < creditB ? ceil : creditB;
     })();
 
@@ -1381,12 +1418,11 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
       amounts: [creditA.toString(), creditB.toString()],
       min_shares: "0",
     }, { gas: 300, deposit: "1" });
-    const depositEvent = kraterEventOf(outcome, "deposit");
+    const depositEvent = poolEvent(outcome, "deposit");
     assert.ok(depositEvent, "the add must mint");
-    assert.equal(depositEvent.data.shares, expectedShares.toString());
+    assert.equal(depositEvent.data.shares, expShares.toString());
     assert.equal(depositEvent.data.amount_a, spentA.toString());
     assert.equal(depositEvent.data.amount_b, spentB.toString());
-
     // Credits are nominal while the ledger is share-denominated, so the
     // remainder may move by at most one share-grid step of the current index.
     const after = (await view(poolId, "get_deposits", { account_id: daveId })).map(BigInt);
@@ -1404,7 +1440,7 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
   test("fuzz: an input always grows the reserve it arrived in", { timeout: 1_200_000 }, async () => {
     await call(bob, poolId, "sync_reserves", {}, { gas: 100 });
     let seed = BigInt(FUZZ_SEED);
-    for (let iteration = 0; iteration < FUZZ_ITERATIONS; iteration += 1) {
+    for (let iteration = 0; iteration < FUZZ_ITERS; iteration += 1) {
       seed = nextSeed(seed);
       const directionA = seed % 2n === 0n;
       const amount = ((1n + (seed % 9n)) * E18) / 10n;
@@ -1416,8 +1452,7 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
         amount: amount.toString(),
         msg: JSON.stringify({ Swap: { min_out: "0" } }),
       }, { gas: 200, deposit: "1" });
-      const swapEvent = kraterEventOf(outcome, "swap");
-      assert.ok(swapEvent, `iteration ${iteration}: the swap must fill`);
+      const swapEvent = poolEvent(outcome, "swap");
       const amountIn = BigInt(swapEvent.data.amount_in);
       const amountOut = BigInt(swapEvent.data.amount_out_gross);
       assert.ok(amountIn > 0n && amountOut > 0n);
@@ -1463,56 +1498,59 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
     assert.ok(BigInt(await view(poolId, "ft_balance_of", { account_id: bobId })) > 0n);
 
     let seed = BigInt(FUZZ_SEED);
-    for (let iteration = 0; iteration < FUZZ_ITERATIONS; iteration += 1) {
+    for (let iteration = 0; iteration < FUZZ_ITERS; iteration += 1) {
       seed = nextSeed(seed);
       const factor = 5_000n + (seed % 15_001n);
       await call(bob, rebasingId, "rebase", { factor_bps: Number(factor) }, { gas: 30 });
       await call(bob, poolId, "sync_reserves", {}, { gas: 100 });
 
-      const [reserveA, reserveB] = (await view(poolId, "get_reserves")).map(BigInt);
-      const supply = BigInt(await view(poolId, "ft_total_supply"));
-      const shares = BigInt(await view(poolId, "ft_balance_of", { account_id: bobId }));
+      const [reservesRaw, supplyRaw, sharesRaw, indexARaw, balABeforeRaw, balBBeforeRaw] =
+        await Promise.all([
+          view(poolId, "get_reserves"),
+          view(poolId, "ft_total_supply"),
+          view(poolId, "ft_balance_of", { account_id: bobId }),
+          view(rebasingId, "ft_index"),
+          view(rebasingId, "ft_balance_of", { account_id: bobId }),
+          view(taxedId, "ft_balance_of", { account_id: bobId }),
+        ]);
+      const [reserveA, reserveB] = reservesRaw.map(BigInt);
+      const supply = BigInt(supplyRaw);
+      const shares = BigInt(sharesRaw);
       const slice = shares / 100n;
       assert.ok(slice > 0n, `iteration ${iteration}: no shares left to withdraw`);
       const expectedA = (slice * reserveA) / supply;
       const expectedB = (slice * reserveB) / supply;
       assert.ok(expectedA >= 0n && expectedB >= 0n);
       assert.ok(expectedA + expectedB > 0n, `iteration ${iteration}: both legs round to zero`);
-      const indexA = BigInt(await view(rebasingId, "ft_index"));
-      const balanceABefore = BigInt(
-        await view(rebasingId, "ft_balance_of", { account_id: bobId }),
-      );
-      const balanceBBefore = BigInt(
-        await view(taxedId, "ft_balance_of", { account_id: bobId }),
-      );
+      const indexA = BigInt(indexARaw);
+      const balABefore = BigInt(balABeforeRaw);
+      const balBBefore = BigInt(balBBeforeRaw);
 
       const outcome = await callRaw(bob, poolId, "withdraw", {
         shares: slice.toString(),
       }, { gas: 300, deposit: "1" });
-      const withdrawEvent = kraterEventOf(outcome, "withdraw");
+      const withdrawEvent = poolEvent(outcome, "withdraw");
       assert.ok(withdrawEvent, `iteration ${iteration}: the withdrawal settles`);
       assert.equal(withdrawEvent.data.shares, slice.toString());
       assert.equal(withdrawEvent.data.amount_a, expectedA.toString());
       assert.equal(withdrawEvent.data.amount_b, expectedB.toString());
-      assert.equal(
-        BigInt(await view(poolId, "ft_balance_of", { account_id: bobId })),
-        shares - slice,
-        `iteration ${iteration}: shares burn`,
-      );
-      assert.equal(
-        BigInt(await view(poolId, "ft_total_supply")),
-        supply - slice,
-        `iteration ${iteration}: supply burns`,
-      );
-      const [afterA, afterB] = (await view(poolId, "get_reserves")).map(BigInt);
+
+      const [sharesAfterRaw, supplyAfterRaw, postReservesRaw, balAAfterRaw, balBAfterRaw] =
+        await Promise.all([
+          view(poolId, "ft_balance_of", { account_id: bobId }),
+          view(poolId, "ft_total_supply"),
+          view(poolId, "get_reserves"),
+          view(rebasingId, "ft_balance_of", { account_id: bobId }),
+          view(taxedId, "ft_balance_of", { account_id: bobId }),
+        ]);
+      assert.equal(BigInt(sharesAfterRaw), shares - slice, `iteration ${iteration}: shares burn`);
+      assert.equal(BigInt(supplyAfterRaw), supply - slice, `iteration ${iteration}: supply burns`);
+      const [afterA, afterB] = postReservesRaw.map(BigInt);
       assert.equal(afterA, reserveA - expectedA, `iteration ${iteration}: reserve A slice`);
       assert.equal(afterB, reserveB - expectedB, `iteration ${iteration}: reserve B slice`);
 
-      const paidA = BigInt(await view(rebasingId, "ft_balance_of", { account_id: bobId }))
-        - balanceABefore;
-      const paidB = BigInt(await view(taxedId, "ft_balance_of", { account_id: bobId }))
-        - balanceBBefore;
-      assert.ok(paidA >= 0n && paidB >= 0n, "payout legs cannot go negative");
+      const paidA = BigInt(balAAfterRaw) - balABefore;
+      const paidB = BigInt(balBAfterRaw) - balBBefore;
       // The rebasing fixture pays in whole shares, so a non-ONE index can add at
       // most one share's nominal value; token B (index ONE) is exact.
       const shareGrid = indexA / E18 + 1n;
@@ -1549,5 +1587,29 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
     const metadata = await view(poolId, "ft_metadata");
     assert.equal(metadata.decimals, 18);
     assert.equal(metadata.spec, "ft-1.0.0");
+  });
+
+  test("harness cache bounds recompute and parallel views match serial", async () => {
+    for (let i = 0; i < 1_000; i += 1) {
+      GAS(30);
+      GAS(60);
+      toYocto("0.02");
+      toYocto("20 NEAR");
+    }
+    const counts = cacheCounts();
+    assert.ok(counts.gas <= 6, `expected bounded gas cache, got ${counts.gas}`);
+    assert.ok(counts.yocto <= 4, `expected bounded yocto cache, got ${counts.yocto}`);
+
+    const serial = [
+      await view(poolId, "pool_name"),
+      await view(poolId, "pool_version"),
+      await view(poolId, "get_reserves"),
+    ];
+    const parallel = await Promise.all([
+      view(poolId, "pool_name"),
+      view(poolId, "pool_version"),
+      view(poolId, "get_reserves"),
+    ]);
+    assert.deepEqual(parallel, serial);
   });
 });

@@ -26,6 +26,29 @@ function killSandboxes() {
   sandboxes.clear();
 }
 
+export async function startSandbox() {
+  const sandbox = await Sandbox.start({});
+  sandboxes.add(sandbox);
+  return sandbox;
+}
+
+export async function stopSandbox(sandbox) {
+  if (!sandbox) return;
+  await Promise.race([
+    sandbox.tearDown().catch(() => {}),
+    new Promise((resolve) => {
+      const timer = setTimeout(resolve, 5_000);
+      timer.unref();
+    }),
+  ]);
+  try {
+    sandbox.childProcess?.kill("SIGKILL");
+  } catch {
+    // Already exited.
+  }
+  sandboxes.delete(sandbox);
+}
+
 process.once("exit", killSandboxes);
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => {
@@ -113,11 +136,33 @@ export function logsOf(outcome) {
   return logs;
 }
 
-export function kraterEvents(outcome) {
-  return logsOf(outcome)
+export function parseEvents(outcome, seenEvents) {
+  const events = logsOf(outcome)
     .filter((line) => line.startsWith("EVENT_JSON:"))
-    .map((line) => JSON.parse(line.slice("EVENT_JSON:".length)))
-    .filter((event) => event.standard === "krater");
+    .map((line) => JSON.parse(line.slice("EVENT_JSON:".length)));
+  if (seenEvents) {
+    for (const event of events) {
+      if (event.standard === "krater") seenEvents.set(event.event, event);
+    }
+  }
+  return events;
+}
+
+export function kraterEvents(outcome) {
+  return parseEvents(outcome).filter((event) => event.standard === "krater");
+}
+
+export function ftTransfers(outcome) {
+  return parseEvents(outcome)
+    .filter((event) => event.event === "ft_transfer")
+    .flatMap((event) => (Array.isArray(event.data) ? event.data : [event.data]));
+}
+
+export async function balances(provider, tokenIds, accountId) {
+  const [a, b] = await Promise.all(
+    tokenIds.map((token) => view(provider, token, "ft_balance_of", { account_id: accountId })),
+  );
+  return { a: BigInt(a), b: BigInt(b) };
 }
 
 const NEAR_SUFFIX = /\s*NEAR$/i;
@@ -149,6 +194,24 @@ export async function createAccount(provider, payer, accountId, nearAmount) {
   return new Account(accountId, provider, keyPair.toString());
 }
 
+export async function createAccounts(provider, payer, specs) {
+  if (specs.length <= 1) {
+    const out = [];
+    for (const [id, amt] of specs) out.push(await createAccount(provider, payer, id, amt));
+    return out;
+  }
+  const keys = specs.map(() => KeyPair.fromRandom("ED25519"));
+  await payer.signAndSendTransaction({
+    receiverId: payer.accountId,
+    actions: keys.map((kp) => actions.addFullAccessKey(kp.getPublicKey())),
+  });
+  return Promise.all(
+    specs.map(([id, amt], i) =>
+      createAccount(provider, new Account(payer.accountId, provider, keys[i].toString()), id, amt),
+    ),
+  );
+}
+
 export async function deploy(account, contractId, wasm) {
   await account.signAndSendTransaction({
     receiverId: contractId,
@@ -162,7 +225,7 @@ export async function register(payer, contractId, accountId) {
     contractId,
     "storage_deposit",
     { account_id: accountId },
-    { gas: 30, deposit: nearToYocto("0.02") },
+    { gas: 30, deposit: toYocto("0.02") },
   );
 }
 
@@ -171,8 +234,7 @@ export async function bootSandbox({
   shareSymbol = "K-LP-demo",
   withCarol = false,
 } = {}) {
-  const sandbox = await Sandbox.start({});
-  sandboxes.add(sandbox);
+  const sandbox = await startSandbox();
   const provider = new JsonRpcProvider({ url: sandbox.rpcUrl });
   const root = new Account(DEFAULT_ACCOUNT_ID, provider, DEFAULT_PRIVATE_KEY);
   const suffix = DEFAULT_ACCOUNT_ID;
@@ -184,13 +246,14 @@ export async function bootSandbox({
   const taxedId = `taxed.${suffix}`;
   const aliceId = `alice.${suffix}`;
 
-  const pool = await createAccount(provider, root, poolId, "20 NEAR");
-  const rebasing = await createAccount(provider, root, rebasingId, "20 NEAR");
-  const taxed = await createAccount(provider, root, taxedId, "20 NEAR");
-  const alice = await createAccount(provider, root, aliceId, "20 NEAR");
-  const carol = withCarol
-    ? await createAccount(provider, root, `carol.${suffix}`, "20 NEAR")
-    : undefined;
+  const specs = [
+    [poolId, "20 NEAR"],
+    [rebasingId, "20 NEAR"],
+    [taxedId, "20 NEAR"],
+    [aliceId, "20 NEAR"],
+  ];
+  if (withCarol) specs.push([`carol.${suffix}`, "20 NEAR"]);
+  const [pool, rebasing, taxed, alice, carol] = await createAccounts(provider, root, specs);
 
   await Promise.all([
     deploy(pool, poolId, poolWasm),
@@ -198,22 +261,23 @@ export async function bootSandbox({
     deploy(taxed, taxedId, mockWasm),
   ]);
 
-  await call(pool, poolId, "new", {
-    token_a: rebasingId,
-    token_b: taxedId,
-    swap_fee_bps: 30,
-    share_name: shareName,
-    share_symbol: shareSymbol,
-  }, { gas: 100 });
-  await call(rebasing, rebasingId, "new", {
-    name: "Krater Rebasing Fixture",
-    symbol: "kREB",
-  }, { gas: 30 });
-  await call(taxed, taxedId, "new", {
-    name: "Krater Taxed Fixture",
-    symbol: "kTAX",
-  }, { gas: 30 });
-
+  await Promise.all([
+    call(pool, poolId, "new", {
+      token_a: rebasingId,
+      token_b: taxedId,
+      swap_fee_bps: 30,
+      share_name: shareName,
+      share_symbol: shareSymbol,
+    }, { gas: 100 }),
+    call(rebasing, rebasingId, "new", {
+      name: "Krater Rebasing Fixture",
+      symbol: "kREB",
+    }, { gas: 30 }),
+    call(taxed, taxedId, "new", {
+      name: "Krater Taxed Fixture",
+      symbol: "kTAX",
+    }, { gas: 30 }),
+  ]);
   return {
     mode: "sandbox",
     network: "sandbox",

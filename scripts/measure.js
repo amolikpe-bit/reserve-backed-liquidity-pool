@@ -22,9 +22,11 @@
 import { writeFile } from "node:fs/promises";
 import {
   attachRpc,
+  balances,
   bootSandbox,
   callRaw as call,
   kraterEvents,
+  stopSandbox,
   register,
   view,
   GAS,
@@ -70,16 +72,8 @@ async function measured(label, outcomePromise, attachedTgas) {
       `${label} burnt ${toTgas(burnt).toFixed(3)} Tgas, above the ${attachedTgas} Tgas attached`,
     );
   }
-  return burnt;
+  return { outcome, burnt };
 }
-
-async function balances(provider, tokenIds, accountId) {
-  const [a, b] = await Promise.all(
-    tokenIds.map((token) => view(provider, token, "ft_balance_of", { account_id: accountId })),
-  );
-  return { a: BigInt(a), b: BigInt(b) };
-}
-
 async function main() {
   const chain = RPC_URL
     ? await attachRpc({ requireCarol: true })
@@ -91,18 +85,23 @@ async function main() {
   const { provider, poolId, rebasingId, taxedId, alice, carol, payer, pool } = chain;
 
   try {
-    for (const contractId of [rebasingId, taxedId, poolId]) {
-      await register(alice, contractId, alice.accountId);
-    }
-    // Carol is registered on the pool (so she can receive shares) but
-    // deliberately not on the tokens: her first payout fails and lands in owed.
-    await register(carol, poolId, carol.accountId);
-
-    if (chain.mode === "sandbox") {
-      for (const tokenId of [rebasingId, taxedId]) {
-        await register(pool, tokenId, poolId);
-      }
-    }
+    await Promise.all([
+      (async () => {
+        for (const contractId of [rebasingId, taxedId, poolId]) {
+          await register(alice, contractId, alice.accountId);
+        }
+      })(),
+      // Carol is registered on the pool (so she can receive shares) but
+      // deliberately not on the tokens: her first payout fails and lands in owed.
+      register(carol, poolId, carol.accountId),
+      chain.mode === "sandbox"
+        ? (async () => {
+            for (const tokenId of [rebasingId, taxedId]) {
+              await register(pool, tokenId, poolId);
+            }
+          })()
+        : Promise.resolve(),
+    ]);
 
     for (const tokenId of [rebasingId, taxedId]) {
       await call(
@@ -129,74 +128,86 @@ async function main() {
     });
 
     const gas = {};
-    gas.add_liquidity = await measured(
-      "add_liquidity",
-      call(
-        alice,
-        poolId,
+    gas.add_liquidity = (
+      await measured(
         "add_liquidity",
-        { amounts: credits, min_shares: "1" },
-        { gas: GAS_ADD_LIQUIDITY, deposit: "1" },
-      ),
-      GAS_ADD_LIQUIDITY,
-    );
+        call(
+          alice,
+          poolId,
+          "add_liquidity",
+          { amounts: credits, min_shares: "1" },
+          { gas: GAS_ADD_LIQUIDITY, deposit: "1" },
+        ),
+        GAS_ADD_LIQUIDITY,
+      )
+    ).burnt;
 
-    const reservesBefore = await view(provider, poolId, "get_reserves");
-    const quoteBefore = await view(provider, poolId, "get_quote", {
-      token_in: taxedId,
-      amount_in: TEN.toString(),
-    });
+    const [preReserves, quoteBefore] = await Promise.all([
+      view(provider, poolId, "get_reserves"),
+      view(provider, poolId, "get_quote", {
+        token_in: taxedId,
+        amount_in: TEN.toString(),
+      }),
+    ]);
 
     // +10% on the first token, then the permissionless sync, then the same quote.
     await call(alice, rebasingId, "rebase", { factor_bps: 11_000 }, { gas: 30 });
-    gas.sync_reserves = await measured(
-      "sync_reserves",
-      call(alice, poolId, "sync_reserves", {}, { gas: GAS_SYNC }),
-      GAS_SYNC,
-    );
+    gas.sync_reserves = (
+      await measured(
+        "sync_reserves",
+        call(alice, poolId, "sync_reserves", {}, { gas: GAS_SYNC }),
+        GAS_SYNC,
+      )
+    ).burnt;
 
-    const reservesAfterSync = await view(provider, poolId, "get_reserves");
-    const quoteAfter = await view(provider, poolId, "get_quote", {
-      token_in: taxedId,
-      amount_in: TEN.toString(),
-    });
+    const [syncReserves, quoteAfter, shareBalanceRaw] = await Promise.all([
+      view(provider, poolId, "get_reserves"),
+      view(provider, poolId, "get_quote", {
+        token_in: taxedId,
+        amount_in: TEN.toString(),
+      }),
+      view(provider, poolId, "ft_balance_of", { account_id: alice.accountId }),
+    ]);
 
     // Withdraw a fixed share slice and record what each leg paid. The rebasing
     // leg is the one whose reserve grew.
-    const shareBalance = BigInt(
-      await view(provider, poolId, "ft_balance_of", { account_id: alice.accountId }),
-    );
+    const shareBalance = BigInt(shareBalanceRaw);
     const slice = shareBalance / 10n;
-    const beforeWithdraw = await balances(provider, [rebasingId, taxedId], alice.accountId);
-    gas.withdraw = await measured(
-      "withdraw",
-      call(alice, poolId, "withdraw", { shares: slice.toString() }, {
-        gas: GAS_WITHDRAW,
-        deposit: "1",
-      }),
-      GAS_WITHDRAW,
-    );
-    const afterWithdraw = await balances(provider, [rebasingId, taxedId], alice.accountId);
+    const preExit = await balances(provider, [rebasingId, taxedId], alice.accountId);
+    gas.withdraw = (
+      await measured(
+        "withdraw",
+        call(alice, poolId, "withdraw", { shares: slice.toString() }, {
+          gas: GAS_WITHDRAW,
+          deposit: "1",
+        }),
+        GAS_WITHDRAW,
+      )
+    ).burnt;
+    const postExit = await balances(provider, [rebasingId, taxedId], alice.accountId);
 
-    const swapCall = call(
-      alice,
-      taxedId,
-      "ft_transfer_call",
-      {
-        receiver_id: poolId,
-        amount: TEN.toString(),
-        msg: JSON.stringify({ Swap: { min_out: "0" } }),
-      },
-      { gas: GAS_CREDIT, deposit: "1" },
+    const swapResult = await measured(
+      "swap",
+      call(
+        alice,
+        taxedId,
+        "ft_transfer_call",
+        {
+          receiver_id: poolId,
+          amount: TEN.toString(),
+          msg: JSON.stringify({ Swap: { min_out: "0" } }),
+        },
+        { gas: GAS_CREDIT, deposit: "1" },
+      ),
+      GAS_CREDIT,
     );
-    gas.swap = await measured("swap", swapCall, GAS_CREDIT);
-    const swapEvents = kraterEvents(await swapCall).filter((event) => event.event === "swap");
+    gas.swap = swapResult.burnt;
+    const swapEvents = kraterEvents(swapResult.outcome).filter((event) => event.event === "swap");
     if (swapEvents.length === 0) {
       throw new Error(
         "the swap receipt tree has no krater Swap event; it refunded instead of filling",
       );
     }
-
     // Deposit fresh credits, then pay them back out through withdraw_deposit.
     await call(
       alice,
@@ -211,17 +222,19 @@ async function main() {
     if (BigInt(freshCredits[0]) === 0n) {
       throw new Error("deposit did not credit token A; cannot measure withdraw_deposit");
     }
-    gas.withdraw_deposit = await measured(
-      "withdraw_deposit",
-      call(
-        alice,
-        poolId,
+    gas.withdraw_deposit = (
+      await measured(
         "withdraw_deposit",
-        { token: rebasingId, amount: freshCredits[0] },
-        { gas: GAS_PAYOUT, deposit: "1" },
-      ),
-      GAS_PAYOUT,
-    );
+        call(
+          alice,
+          poolId,
+          "withdraw_deposit",
+          { token: rebasingId, amount: freshCredits[0] },
+          { gas: GAS_PAYOUT, deposit: "1" },
+        ),
+        GAS_PAYOUT,
+      )
+    ).burnt;
 
     // Move shares to carol, who is registered on the pool but not on the tokens.
     // Carol's withdrawal burns shares, both payout legs fail, and the callback
@@ -252,14 +265,16 @@ async function main() {
     }
 
     await register(carol, rebasingId, carol.accountId);
-    gas.claim_owed = await measured(
-      "claim_owed",
-      call(carol, poolId, "claim_owed", { token: rebasingId }, {
-        gas: GAS_PAYOUT,
-        deposit: "1",
-      }),
-      GAS_PAYOUT,
-    );
+    gas.claim_owed = (
+      await measured(
+        "claim_owed",
+        call(carol, poolId, "claim_owed", { token: rebasingId }, {
+          gas: GAS_PAYOUT,
+          deposit: "1",
+        }),
+        GAS_PAYOUT,
+      )
+    ).burnt;
     if (BigInt(backlog[1]) > 0n) {
       await register(carol, taxedId, carol.accountId);
       await call(carol, poolId, "claim_owed", { token: taxedId }, {
@@ -296,14 +311,14 @@ async function main() {
         rebaseFactorBps: 11_000,
       },
       reserves: {
-        before: reservesBefore,
-        afterSync: reservesAfterSync,
+        before: preReserves,
+        afterSync: syncReserves,
       },
       shareValue: {
         sliceShares: slice.toString(),
         paidOut: {
-          a: (afterWithdraw.a - beforeWithdraw.a).toString(),
-          b: (afterWithdraw.b - beforeWithdraw.b).toString(),
+          a: (postExit.a - preExit.a).toString(),
+          b: (postExit.b - preExit.b).toString(),
         },
       },
       gasFormula: "transaction_outcome.outcome.gas_burnt + sum(receipts_outcome[].outcome.gas_burnt)",
@@ -321,9 +336,7 @@ async function main() {
     );
     console.log(`wrote ${path}`);
   } finally {
-    if (chain.sandbox) {
-      await chain.sandbox.stop();
-    }
+    await stopSandbox(chain.sandbox);
   }
 }
 

@@ -13,9 +13,11 @@
 import assert from "node:assert/strict";
 import {
   attachRpc,
+  balances,
   bootSandbox,
   callRaw as call,
   register,
+  stopSandbox,
   kraterEvents,
   view,
   GAS_ADD_LIQUIDITY,
@@ -38,17 +40,20 @@ async function main() {
   try {
     // Registration first: receiving a NEP-141 balance or a share requires a
     // storage deposit on the contract that will hold it.
-    for (const contractId of [rebasingId, taxedId, poolId]) {
-      await register(alice, contractId, alice.accountId);
-    }
-
-    if (chain.mode === "sandbox") {
-      // The pool must be registered on both fixtures before it can hold them.
-      for (const tokenId of [rebasingId, taxedId]) {
-        await register(pool, tokenId, poolId);
-      }
-    }
-
+    await Promise.all([
+      (async () => {
+        for (const contractId of [rebasingId, taxedId, poolId]) {
+          await register(alice, contractId, alice.accountId);
+        }
+      })(),
+      chain.mode === "sandbox"
+        ? (async () => {
+            for (const tokenId of [rebasingId, taxedId]) {
+              await register(pool, tokenId, poolId);
+            }
+          })()
+        : Promise.resolve(),
+    ]);
     // Fund the demo account from the fixture's free mint.
     for (const tokenId of [rebasingId, taxedId]) {
       await call(
@@ -84,11 +89,13 @@ async function main() {
       { gas: GAS_ADD_LIQUIDITY, deposit: "1" },
     );
 
-    const reservesAfterAdd = await view(provider, poolId, "get_reserves");
-    const quoteBefore = await view(provider, poolId, "get_quote", {
-      token_in: taxedId,
-      amount_in: SWAP_IN.toString(),
-    });
+    const [addReserves, quoteBefore] = await Promise.all([
+      view(provider, poolId, "get_reserves"),
+      view(provider, poolId, "get_quote", {
+        token_in: taxedId,
+        amount_in: SWAP_IN.toString(),
+      }),
+    ]);
 
     // Swap: the pool syncs fresh balances, then fills.
     const swapOutcome = await call(
@@ -103,27 +110,28 @@ async function main() {
       { gas: GAS_CREDIT, deposit: "1" },
     );
 
-    const reservesAfterSwap = await view(provider, poolId, "get_reserves");
+    const swapReserves = await view(provider, poolId, "get_reserves");
 
     // Rebase the input reserve up by ten percent and sync. Views are cache-based,
     // so the quote moves only after the sync.
     await call(alice, rebasingId, "rebase", { factor_bps: 11_000 }, { gas: 30 });
     await call(alice, poolId, "sync_reserves", {}, { gas: GAS_SYNC });
-    const reservesAfterRebase = await view(provider, poolId, "get_reserves");
-    const quoteAfter = await view(provider, poolId, "get_quote", {
-      token_in: taxedId,
-      amount_in: SWAP_IN.toString(),
-    });
+    const [rebaseReserves, quoteAfter, shareBalanceRaw] = await Promise.all([
+      view(provider, poolId, "get_reserves"),
+      view(provider, poolId, "get_quote", {
+        token_in: taxedId,
+        amount_in: SWAP_IN.toString(),
+      }),
+      view(provider, poolId, "ft_balance_of", { account_id: alice.accountId }),
+    ]);
 
     // Withdraw half the shares; the pool syncs before it settles.
-    const shares = BigInt(
-      await view(provider, poolId, "ft_balance_of", { account_id: alice.accountId }),
-    );
-    const withdrawShares = shares / 2n;
-    if (withdrawShares === 0n) {
+    const shares = BigInt(shareBalanceRaw);
+    const exitShares = shares / 2n;
+    if (exitShares === 0n) {
       throw new Error("no LP shares to withdraw; add_liquidity did not mint any");
     }
-    await call(alice, poolId, "withdraw", { shares: withdrawShares.toString() }, {
+    await call(alice, poolId, "withdraw", { shares: exitShares.toString() }, {
       gas: GAS_WITHDRAW,
       deposit: "1",
     });
@@ -167,31 +175,26 @@ async function main() {
     const swapEvents = kraterEvents(swapOutcome).filter((event) => event.event === "swap");
     assert(shares > 0n, `add_liquidity minted no LP shares to ${alice.accountId}`);
     assert(
-      BigInt(reservesAfterSwap[0]) !== BigInt(reservesAfterAdd[0]) ||
-        BigInt(reservesAfterSwap[1]) !== BigInt(reservesAfterAdd[1]),
-      `the swap left both reserves unchanged at ${reservesAfterAdd.join(" / ")}`,
+      BigInt(swapReserves[0]) !== BigInt(addReserves[0]) ||
+        BigInt(swapReserves[1]) !== BigInt(addReserves[1]),
+      `the swap left both reserves unchanged at ${addReserves.join(" / ")}`,
     );
     assert(swapEvents.length > 0, `no krater Swap event in the swap outcome from ${poolId}`);
 
-    const finalBalances = {
-      rebasing: await view(provider, rebasingId, "ft_balance_of", { account_id: alice.accountId }),
-      taxed: await view(provider, taxedId, "ft_balance_of", { account_id: alice.accountId }),
-    };
+    const finalBalances = await balances(provider, [rebasingId, taxedId], alice.accountId);
 
     console.log(`krater demo ok (${chain.mode}): ${poolId}`);
-    console.log(`  reserves   after add   ${reservesAfterAdd.join(" / ")}`);
-    console.log(`             after swap  ${reservesAfterSwap.join(" / ")}`);
-    console.log(`             after +10%  ${reservesAfterRebase.join(" / ")}`);
-    console.log(`  shares     ${shares} minted, ${withdrawShares} burned`);
+    console.log(`  reserves   after add   ${addReserves.join(" / ")}`);
+    console.log(`             after swap  ${swapReserves.join(" / ")}`);
+    console.log(`             after +10%  ${rebaseReserves.join(" / ")}`);
+    console.log(`  shares     ${shares} minted, ${exitShares} burned`);
     console.log(
       `  quote      ${SWAP_IN} taxed -> ${quoteBefore} then ${quoteAfter} rebasing (${deltaBps} bps)`,
     );
     console.log(`  swap       ${swapEvents.length} krater Swap event(s)`);
-    console.log(`  alice      ${finalBalances.rebasing} rebasing, ${finalBalances.taxed} taxed`);
+    console.log(`  alice      ${finalBalances.a} rebasing, ${finalBalances.b} taxed`);
   } finally {
-    if (chain.sandbox) {
-      await chain.sandbox.stop();
-    }
+    await stopSandbox(chain.sandbox);
   }
 }
 
