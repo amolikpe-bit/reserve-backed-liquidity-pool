@@ -1,6 +1,8 @@
 # krater
 **A NEAR pool whose reserves are the real NEP-141 balances it holds.** Rebase, dividend, or taxed-transfer gains belong to the holders. No owner, pause, or upgrade path exists. Contract [`contracts/pool`](contracts/pool) (Rust, near-sdk 5.30.2), manifest [`manifest.json`](manifest.json), licence Apache-2.0.
 
+Tracks: `defi` · Baseline: tag `pre-hackathon` at `d6eafae` · diff `git diff pre-hackathon..hackathon-submission`.
+
 ```mermaid
 sequenceDiagram
     accTitle: krater runtime flow
