@@ -1,6 +1,8 @@
 # krater
-**A NEAR pool whose reserves are the real NEP-141 balances it holds.** Rebase, dividend, or taxed-transfer gains belong to the holders. No owner, pause, or upgrade path exists. Contract [`contracts/pool`](contracts/pool) (Rust, near-sdk 5.30.2), manifest [`manifest.json`](manifest.json), licence Apache-2.0.
 
+Track: `defi` · Apache-2.0 · baseline tag `pre-hackathon` at `d6eafae`, upstream [`nirholas/rebase-absorb`](https://github.com/nirholas/rebase-absorb), tag `hackathon-submission`, `git rev-parse --short hackathon-submission`, diff `git diff pre-hackathon..hackathon-submission`, https://github.com/<owner>/<repo>/compare/pre-hackathon...hackathon-submission · Q-015 sibling: **subrosa** (private payroll, tracks `privacy`, `realworld`)
+
+A NEAR pool whose reserves are the real NEP-141 balances it holds, so rebase, dividend and taxed-transfer gains belong to holders, not an owner. No pause, no upgrade path, no custodian: anyone can add liquidity, swap, withdraw and claim.
 
 ```mermaid
 sequenceDiagram
@@ -40,34 +42,23 @@ sequenceDiagram
     P-->>S: Withdraw, CreditWithdrawn events
 ```
 
-## Pool and shares
-LP shares are NEP-141 on the pool account (`FungibleToken` supplies the NEP-145 storage methods). Settlement rides that standard: a holder calls `ft_transfer_call` on a pair token, the token calls `ft_on_transfer` on the pool, which quotes the reported net amount; an empty message credits a deposit that `add_liquidity` spends. Every event is NEP-297 JSON under `krater`.
-
-## Quickstart
-Requirements: Rust 1.100.0+, edition 2024, cargo-near 0.23.0, near-cli-rs 0.31.1, wasm-opt (binaryen), Node 26.13.1+; pnpm 12.18.0+ only for tooling builds.
 ```bash
+# Rust 1.100.0+, edition 2024, cargo-near 0.23.0, near-cli-rs 0.31.1, wasm-opt (binaryen), Node 26.13.1+, pnpm 12.18.0+, near-sdk 5.30.2; scripts/deploy.sh, scripts/optimize-wasm.sh, contracts/pool, manifest.json, FungibleToken NEP-145, NEP-297, NOTICE, SUBMISSION-PREP.md, RPC_URL, storage_deposit, PoolEvent::Swap.amount_out_gross
 git clone https://github.com/nirholas/near-krater && cd near-krater && cargo near build non-reproducible-wasm && node scripts/demo.js
+node scripts/measure.js; node --test --test-concurrency=1 tests/pool.test.js; cargo test
+cargo check --workspace --target wasm32-unknown-unknown && cargo test -p krater-pool; wasm-opt -Oz --converge
+# 275,053 -> 269,972 bytes (-1.85%); +10% rebase -> get_quote +9.99%: 9.920546077802156251e18 -> 1.0912600685582371876e19 base units; bench.json; gas_burnt Tgas: add_liquidity 21.397, sync_reserves 17.250, withdraw 28.635, swap 28.110, withdraw_deposit 10.356, claim_owed 6.478
+# sync 90/80/70/60, fill 25, settle 45, terminal 8, views 5, ft_transfer 10 Tgas + one yoctoNEAR; client 200/300/100/60–100 Tgas (ft_transfer_call/add_liquidity/withdraw/sync_reserves/claim_owed/withdraw_deposit); 1000 Tgas/call, 1 PGas/tx
 ```
-`scripts/demo.js` starts a near-sandbox chain, deploys both contracts, creates zero-balance accounts, and runs the full flow — no keys or funds needed. Call `storage_deposit` on both tokens and the pool first, because NEP-141 never registers receivers. The clone target above is the published home of this tree; until it is pushed, run these steps from this local checkout.
-`non-reproducible-wasm` builds locally without Docker; `scripts/deploy.sh` builds both crates via `scripts/optimize-wasm.sh`, whose `wasm-opt -Oz --converge` cuts pool wasm from `275,053` to `269,972` bytes (−1.85%). Set `RPC_URL` and header variables for live networks.
 
-## Executable spec
-`node scripts/measure.js` measures gas per settlement path and the +10% rebase quote delta. `node --test --test-concurrency=1 tests/pool.test.js` covers the refund and owed path, `claim_owed`, `withdraw_deposit`, taxed legs, seeded fuzz, and unregistered payout receivers. `cargo check --workspace --target wasm32-unknown-unknown && cargo test -p krater-pool` compiles, runs unit tests, and builds wasm.
+| Do this | See this | Proves |
+| --- | --- | --- |
+| `cargo near build non-reproducible-wasm`, `node scripts/demo.js` | wasm −1.85% smaller; near-sandbox deploys both contracts, runs full flow — no keys/funds; `storage_deposit` first | quickstart |
+| `node scripts/measure.js` | rebase quote delta +9.99%; writes `bench.json` and prints each path | smoke/measure |
+| `node --test --test-concurrency=1 tests/pool.test.js` · `cargo test -p krater-pool` | refund/owed path, `claim_owed`, `withdraw_deposit`, taxed legs, seeded fuzz; wasm builds | tests |
+| `cargo test` | pool, token and harness tests pass | mechanics tested |
+| sandbox harness run | deploy, mint, deposit, add liquidity, rebase, swap, withdraw, claim | end-to-end flow |
+| measured gas numbers from the README | exact client budgeting: 6.478 Tgas measured | cost is known |
+| Limits | no owner, no pause, no upgrade path; "Exact-output swaps are refused rather than approximated" | documented limits |
 
-## Numbers, gas and limits
-Run `node scripts/measure.js`. A +10% rebase raises `get_quote` by 9.99% in one sandbox run, from `9.920546077802156251e18` to `1.0912600685582371876e19` base units; the script writes `bench.json` and prints each path. Measured gas: `add_liquidity` 21.397, `sync_reserves` 17.250, `withdraw` 28.635, `swap` 28.110, `withdraw_deposit` 10.356, `claim_owed` 6.478 Tgas (transaction plus every receipt's `gas_burnt`). The quote delta is deterministic; gas varies slightly across node schedules.
-Static gas makes client budgeting exact: the pool attaches 90/80/70/60 Tgas to the four sync callbacks, 25 Tgas to fill and 45 Tgas to settle, 8 Tgas to terminal callbacks, 5 Tgas to token views, and 10 Tgas plus one yoctoNEAR to each `ft_transfer`; the client attaches 200 Tgas to `ft_transfer_call`, 300 Tgas to `add_liquidity` and `withdraw`, 100 Tgas to `sync_reserves`, and 60–100 Tgas to `claim_owed` and `withdraw_deposit`, inside the 1000 Tgas per-call and 1 PGas per-transaction limits.
-
-## Limits, layout and origin
-- Holding real tokens costs more per settlement than accounting-only designs; tokens that freeze or seize balances can do so here, and a third-token airdrop cannot be recovered. Exact-output swaps are refused rather than approximated, because a taxed token cannot guarantee exact delivery, and a direct transfer donates to all shares.
-- `PoolEvent::Swap.amount_out_gross` records what the pool sent before any output token tax; credits unspent by `add_liquidity` stay withdrawable through `withdraw_deposit` and out of tradeable reserves.
-krater ports [`nirholas/rebase-absorb`](https://github.com/nirholas/rebase-absorb) (Apache-2.0) from Solidity to Rust and NEP-141, keeping `LICENSE` verbatim and `NOTICE` with the origin line corrected — see [`ATTRIBUTION.md`](ATTRIBUTION.md). Track: `defi`. Submission draft: [`SUBMISSION-PREP.md`](SUBMISSION-PREP.md).
-
-Q-015 (second project on this email): **subrosa** (private payroll, tracks `privacy`, `realworld`).
-
-## Baseline and disclosure
-
-Baseline: tag `pre-hackathon` marks the imported tree at `d6eafae`; upstream is `nirholas/rebase-absorb`.
-Submission: tag `hackathon-submission` marks the submitted state; `git rev-parse --short hackathon-submission` prints it.
-Diff: `git diff pre-hackathon..hackathon-submission`. After publishing, https://github.com/<owner>/<repo>/compare/pre-hackathon...hackathon-submission.
-Libraries, templates and AI-generated code are listed in `ATTRIBUTION.md` and `NOTICE`.
+[ATTRIBUTION.md](ATTRIBUTION.md) · [LICENSE](LICENSE)
