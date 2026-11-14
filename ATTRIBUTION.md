@@ -1,32 +1,24 @@
 # Attribution
-
 ## Origin
+- Repository: <https://github.com/nirholas/rebase-absorb> | Licence: Apache-2.0 | Baseline: `main` at `c1665553` (last commit 2026-10-10)
+- Retained verbatim: `LICENSE` and `NOTICE`
 
-- Repository: <https://github.com/nirholas/rebase-absorb>
-- Licence: Apache-2.0
-- Baseline: `main` at `c1665553` (last commit 2026-10-10)
-- Retained verbatim: `LICENSE` and `NOTICE` from that baseline
-
-krater is a port of the origin's single-pool design from Solidity to Rust and NEP-141. The mechanism is the same. The pool holds the pair tokens itself. The balance is the reserve. Settlement measures what arrived. There is no owner, pause or upgrade path. The implementation is not a translation of the origin's files; it is a rewrite against NEAR's call model.
-
+krater ports the single-pool design from Solidity to Rust and NEP-141. The pool holds both pair tokens as its reserves. Settlement measures the arrived balance. There is no owner, pause, or upgrade path.
 ## Changes made
+- **Language and runtime.** A Cargo workspace with `krater-pool` (near-sdk 5.30.2) and test-only `krater-mock-ft` replaces Solidity.
+- **LP shares.** `FungibleToken` (near-sdk-contract-tools 4.0.0, Apache-2.0) replaces ERC-20 with NEP-141 shares. It adds NEP-145 registration and NEP-148 18-decimal metadata.
+- **Reserves.** Cached tradeable reserves and a permissionless sync chain replace live reads. Settlement syncs before `get_quote`.
+- **Settlement.** `ft_transfer_call` and `ft_on_transfer` replace approval-and-pull. Swaps, adds, and withdrawals run a sync chain and private callback.
+- **Deposits.** Per-token credits (Ref Finance pattern) replace atomic pulls. Explicit `add_liquidity` and `withdraw_deposit` use index-scaled shares excluded from reserves.
+- **Claims and sweeping.** The claim-token model and sweep are deleted. Each pool account holds its own reserves.
+- **Errors.** Named panics replace Solidity selectors (`InvalidFee`, `NoReserves`, `AmountTooSmall`, `InsufficientInitialLiquidity`). NEAR adds `InvalidPair`, `UnknownToken`, `Busy`, `InvalidIndex`, `MathOverflow`.
+- **Events.** NEP-297 JSON events under `krater` replace Solidity events. Added `CreditAdded`, `CreditSpent`, `CreditWithdrawn`, and `ReservesSynced`.
+- **Math.** `primitive-types` 0.14.0 `U256` and `U256::integer_sqrt()` replace the fixed-point library. Results narrow to `u128` once.
+- **Tooling, tests and client.** Build scripts, submodules, docs, and chain tables are deleted. `cargo-near`, `near-cli-rs`, and Node scripts drive near-sandbox or RPC.
+- **Manifest.** The NEAR entry keeps contract name, chains, path, repository, and boundaries. EVM ABI, selectors, and configuration are deleted.
 
-- **Language and runtime.** Solidity contracts and their build system replaced by a Cargo workspace with `krater-pool` (near-sdk 5.30.2) and a test-only `krater-mock-ft` fixture.
-- **LP shares.** An ERC-20 inheritance replaced by NEP-141 on the pool account, produced by `FungibleToken` from near-sdk-contract-tools 4.0.0 (used under Apache-2.0), including NEP-145 registration and NEP-148 metadata at 18 decimals.
-- **Reserves.** A live balance read replaced by a cached tradeable reserve plus a permissionless sync chain, because NEAR reads are asynchronous. Settlement syncs before it quotes; `get_quote` reads the cache.
-- **Settlement.** An approval-and-pull path replaced by `ft_transfer_call` and `ft_on_transfer`, with the received amount supplied by the token. Swaps, liquidity adds and withdrawals run a sync chain and a private settlement callback.
-- **Deposits.** Atomic two-leg pulls replaced by per-token deposit credits (the Ref Finance pattern), an explicit `add_liquidity`, and `withdraw_deposit` for unused credits. Credits are index-scaled shares excluded from tradeable reserves.
-- **Claims and sweeping.** The origin's claim-token model and its sweep are deleted; NEAR has no shared pool singleton, so the pool account is the only holder.
-- **Errors.** Solidity selectors replaced by named panic strings with the same names where the condition survives (`InvalidFee`, `NoReserves`, `AmountTooSmall`, `InsufficientInitialLiquidity`), plus NEAR-specific ones (`InvalidPair`, `UnknownToken`, `Busy`, `InvalidIndex`, `MathOverflow`).
-- **Events.** Solidity events replaced by NEP-297 JSON events under the `krater` standard, with `CreditAdded`, `CreditSpent`, `CreditWithdrawn` and `ReservesSynced` added for state that is not otherwise enumerable.
-- **Math.** Fixed-point library usage replaced by `primitive-types` 0.14.0 `U256` intermediates and `U256::integer_sqrt()`, narrowed back to `u128` once.
-- **Tooling, tests and client.** The origin's contract build scripts, submodule dependencies, static site, integration documents and chain tables are removed. Deployment is `cargo-near` plus `near-cli-rs`; the demo and the measurements are Node scripts on a near-sandbox chain or a live RPC; integration tests use a native sandbox handle.
-- **Manifest.** The origin's machine-readable catalogue entry is rewritten for NEAR: the contract name, chain list, source path, repository, and a limitation section that describes this port's boundaries. The EVM-only blocks (ABI, permissions, error selectors, configuration) are removed.
-
-The origin's `NOTICE` is kept unchanged as provenance. It records the third-party components of the origin's own build. Those components are not part of this repository. Nothing here is relicensed by that notice.
-
+`NOTICE` records only the origin build components. Nothing here is relicensed by that notice.
 ## Dependency licences
-
 | Component | Version | Licence |
 | --- | --- | --- |
 | near-sdk | 5.30.2 | Apache-2.0 |
@@ -38,4 +30,4 @@ The origin's `NOTICE` is kept unchanged as provenance. It records the third-part
 | Node.js | 26.13.1 | see upstream |
 | pnpm | 12.18.0 | see upstream |
 
-The Rust dependencies are pinned in the workspace `Cargo.toml`; the JavaScript dependencies are pinned in `package.json`.
+The Rust dependencies are pinned in `Cargo.toml`; the JavaScript dependencies are pinned in `package.json`.

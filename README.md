@@ -1,60 +1,37 @@
 # krater
+**A NEAR pool whose reserves are the real NEP-141 balances it holds.** Rebase, dividend, or taxed-transfer changes belong to holders. No owner, pause, or upgrade path exists.
 
-**A NEAR pool whose reserves are the real NEP-141 balances it holds.** A rebase, a dividend or a taxed transfer changes what the pool is worth. Share holders own that change without an accounting step. The pool has no owner, no pause and no upgrade path.
-
-- Contract: [`contracts/pool`](contracts/pool) (Rust, near-sdk 5.30.2)
-- Manifest: [`manifest.json`](manifest.json)
-- Licence: Apache-2.0
+- Contract: [`contracts/pool`](contracts/pool) (Rust, near-sdk 5.30.2) | Manifest: [`manifest.json`](manifest.json) | Licence: Apache-2.0
 
 ## What it is
+The pool holds both pair tokens on its own account. The balance is the reserve. No wrapper, claim token, or cached price reconciliation is needed:
+- A **rebasing** token supply gain raises the pool balance. The next settlement quotes a larger reserve, raising every LP share value.
+- A **fee-on-transfer** token is priced from what arrived. Settlement reads the token-reported amount rather than the sent amount.
+- A **dividend or airdrop** lands directly in the reserve. It belongs to the shares like a rebase.
 
-The pool holds both tokens of a pair on its own account. The balance is the reserve. There is no wrapper, no claim token and no cached price to reconcile:
-
-- A **rebasing** token that gains supply raises the pool's balance directly. The next settlement quotes a larger reserve. Every LP share is worth more.
-- A **fee-on-transfer** token is priced from what actually arrived. Settlement reads the amount the token reports. It does not read the amount the sender typed.
-- A **dividend or airdrop** to the pool account is the same event as a rebase: it lands in the reserve and belongs to the shares.
-
-The pool is a constant-product curve. The fee is taken from the input side and left in the reserve. Reserves are cached for views. A permissionless sync chain refreshes them. Settlement always syncs first. A trade is never decided from stale numbers.
+The pool uses a constant-product curve with input-side fees. Reserves are cached for views and refreshed by a permissionless sync chain. Settlement always syncs before trading.
 
 ## The primitive: NEP-141
+LP shares are NEP-141 on the pool account itself. The `FungibleToken` derive provides `ft_transfer`, `ft_transfer_call`, `ft_total_supply`, `ft_balance_of`, `ft_metadata`, `ft_resolve_transfer`, and NEP-145 storage methods.
 
-LP shares are NEP-141 on the pool account itself, not a bespoke ledger. The `FungibleToken` derive supplies `ft_transfer`, `ft_transfer_call`, `ft_total_supply`, `ft_balance_of`, `ft_metadata`, `ft_resolve_transfer` and the NEP-145 storage methods.
-
-Settlement enters through the same standard:
-
+Settlement enters through the same NEP-141 standard:
 - A holder calls `ft_transfer_call` on a pair token.
 - The token calls `ft_on_transfer` on the pool.
-- The pool quotes from the amount that call reports.
+- The pool quotes from the reported net amount.
 
-`ft_transfer_call` with an empty message credits a deposit balance. `add_liquidity` spends those credits. Everything the pool emits is NEP-297 JSON, standard `krater`.
+An empty `ft_transfer_call` message credits a deposit balance, which `add_liquidity` spends. Every event is NEP-297 JSON under `krater`.
 
 ## Quickstart
-
-Requirements:
-
-- Rust 1.100.0 or newer (edition 2024)
-- cargo-near 0.23.0,
-- near-cli-rs 0.31.1,
-- wasm-opt (binaryen)
-- Node 26.13.1 or newer
-- pnpm 12.18.0 or newer
-
+Requirements: Rust 1.100.0+, edition 2024, cargo-near 0.23.0, near-cli-rs 0.31.1, wasm-opt (binaryen), Node 26.13.1+, pnpm 12.18.0+.
 ```bash
 git clone https://github.com/nirholas/near-krater && cd near-krater && cargo near build non-reproducible-wasm && node scripts/demo.js
 ```
+`scripts/demo.js` starts a near-sandbox chain, deploys both contracts, creates zero-balance accounts, and runs the full flow. It needs no keys or funds. Call `storage_deposit` on both tokens and the pool before transferring balances, because NEP-141 never registers receivers automatically.
 
-`scripts/demo.js` starts a near-sandbox chain and deploys both contracts. It creates zero-balance accounts. It runs deposit -> add liquidity -> quote -> swap -> rebase -> sync -> withdraw. It needs no keys and no funds.
-
-Registration is explicit. A NEP-141 transfer never registers its receiver. The script calls `storage_deposit` on both tokens and on the pool before it moves a balance.
-
-`non-reproducible-wasm` is the local build: it compiles without Docker. The default reproducible variant runs Docker against committed source. It needs the source pushed to deploy. Use it only for a pinned-image release. The quickstart does not cover it.
-
-`scripts/deploy.sh` builds both crates, then runs `scripts/optimize-wasm.sh` on the exact artifact it deploys. The script applies `wasm-opt -Oz --converge` with cargo-near's wasm feature set. It also reorders module elements. It runs after the built-in `-O` pass. The release profile targets minimum code size. The measured pool wasm drops from 275,141 to 270,101 bytes (−1.83%). To run against a live network, set `RPC_URL` and the account/key variables listed in the script header instead. `scripts/deploy.sh` creates the accounts, deploys, initialises and registers them, and then locks the pool account.
+`non-reproducible-wasm` builds locally without Docker; reproducible Docker releases need pushed source. `scripts/deploy.sh` builds both crates and runs `scripts/optimize-wasm.sh` (`wasm-opt -Oz --converge` with cargo-near features, sign-extension, element reordering, instruction optimization, and RSE after `-O`). The release profile cuts pool wasm from 275,053 to 269,972 bytes (−1.85%). Set `RPC_URL` and header variables for live networks; `scripts/deploy.sh` creates, deploys, initializes, registers, and locks the pool account.
 
 ## Executable spec
-
-Every claim below is a command that starts a zero-funds sandbox, deploys both contracts, and asserts the observable:
-
+Every command starts a zero-funds sandbox, deploys both contracts, and verifies the observable:
 | Behaviour | Command |
 |---|---|
 | deposit credits -> add liquidity -> quote -> swap -> rebase + sync -> withdraw | `node scripts/demo.js` |
@@ -62,74 +39,52 @@ Every claim below is a command that starts a zero-funds sandbox, deploys both co
 | refund/owed path, `claim_owed`, `withdraw_deposit`, taxed legs, seeded fuzz | `node --test --test-concurrency=1 tests/pool.test.js` |
 | compile, unit tests, wasm build | `cargo check --workspace --target wasm32-unknown-unknown && cargo test -p krater-pool` |
 
-`scripts/demo.js` prints the reserves before/after the swap and the rebase. It prints the shares minted/burned and the quote delta in bps. It also prints the `Swap` event count. It exits non-zero if any of those did not move. `tests/pool.test.js` runs the refund and claim legs against a receiver that is not registered for the payout token.
+`scripts/demo.js` prints reserves, minted/burned shares, quote delta in bps, and `Swap` count, exiting non-zero on failure. `tests/pool.test.js` also tests refund and claim paths for unregistered payout receivers.
 
 ## Reproduce the numbers
-
 ```bash
 node scripts/measure.js
 ```
-
-**Headline (sandbox, one run): a +10% rebase on one reserve raises the same `get_quote` by 9.99%** — 9.920546077802156251e18 → 1.0912600685582371876e19 base units. `scripts/measure.js` writes `bench.json` and prints that delta plus the measured gas for each settlement path:
-
+**Headline (sandbox, one run): a +10% rebase raises `get_quote` by 9.99%** — 9.920546077802156251e18 → 1.0912600685582371876e19 base units. `scripts/measure.js` writes `bench.json` and prints each settlement path's gas:
 | Path | Measured |
 |---|---|
-| `add_liquidity` | 21.518 Tgas |
-| `sync_reserves` | 17.395 Tgas |
-| `withdraw` | 28.819 Tgas |
-| `swap` | 28.257 Tgas |
-| `withdraw_deposit` | 10.422 Tgas |
-| `claim_owed` | 6.521 Tgas |
+| `add_liquidity` | 21.397 Tgas |
+| `sync_reserves` | 17.250 Tgas |
+| `withdraw` | 28.635 Tgas |
+| `swap` | 28.110 Tgas |
+| `withdraw_deposit` | 10.356 Tgas |
+| `claim_owed` | 6.478 Tgas |
 
-Gas is the transaction's own `gas_burnt` plus the `gas_burnt` of every receipt it produced. The sandbox path needs no keys and no funds. A live run needs the fixture accounts and two funded keys, as documented at the top of the script. Re-running the command reproduces the table. The delta is deterministic; gas can vary by a few percent with the node's schedule.
+Gas sums transaction `gas_burnt` and all receipt `gas_burnt`. Sandbox runs need no keys or funds; live runs require fixture accounts and two funded keys. The quote delta is deterministic; gas varies slightly across node schedules.
 
 ## Gas and limits
+Static gas makes client budgeting exact. The pool attaches:
+- 90, 80, 70, and 60 Tgas to the four sync callbacks; 25 Tgas to fill; 45 Tgas to settle.
+- 8 Tgas to terminal callbacks; 5 Tgas to token views; 10 Tgas plus one yoctoNEAR per `ft_transfer`.
 
-Gas is static, so a caller can budget it exactly. The pool attaches:
-
-- 90, 80, 70 and 60 Tgas to the four sync callbacks
-- 25 Tgas to the fill
-- 45 Tgas to the settlement
-- 8 Tgas to each terminal callback
-- 5 Tgas to each token view
-- 10 Tgas plus the one yoctoNEAR NEP-141 requires for every `ft_transfer` it makes
-
-The client funds that chain from the outside:
-
-- 200 Tgas per `ft_transfer_call` (credit a deposit, or swap)
-- 300 Tgas for `add_liquidity` and for `withdraw`
-- 100 Tgas for `sync_reserves`
-- 60–100 Tgas for `claim_owed` and `withdraw_deposit`
-
-A function call may attach up to 1000 Tgas and a transaction up to 1 PGas. The `300 Tgas` that `scripts/deploy.sh` passes to `new` is a near-cli-rs value inside that envelope, not a protocol ceiling. `scripts/demo.js` and `scripts/measure.js` attach the budgets above. `measure.js` refuses to report a path that reverted or that burnt more gas than it attached.
+The client attaches: 200 Tgas (`ft_transfer_call`), 300 Tgas (`add_liquidity`, `withdraw`), 100 Tgas (`sync_reserves`), and 60–100 Tgas (`claim_owed`, `withdraw_deposit`). Calls allow up to 1000 Tgas and transactions up to 1 PGas. `300 Tgas` in `scripts/deploy.sh` for `new` sits inside that envelope. `scripts/demo.js` and `scripts/measure.js` attach these budgets, and `measure.js` rejects reverted or over-budget paths.
 
 ## Where it does not help
-
-Holding real tokens costs more per settlement than an accounting-only design. That is the trade: it is right for exactly the tokens the cheaper design cannot serve.
-
-- Exact-output swaps are refused by construction rather than approximated. A token that taxes its own transfers cannot deliver an exact amount.
-- A direct transfer to the pool is a donation to every share. It is harmless, but it moves share value without a deposit.
-- A token that can freeze or seize balances can do so here, exactly as it can anywhere else it is held.
-- Only the pool's own two tokens are absorbed. An airdrop of a third token sits on the account with no way to reach anybody.
-- `get_quote` reads the reserve cache. It is a view of the last sync, not a live read; settlement syncs first.
+Holding real tokens costs more per settlement than accounting-only designs, serving tokens that cheaper designs cannot handle:
+- Exact-output swaps are refused rather than approximated, because taxed tokens cannot guarantee exact delivery.
+- Direct transfers donate to all shares, changing share value without a deposit.
+- Tokens that freeze or seize balances can do so here.
+- Third-token airdrops cannot be recovered from the pool account.
+- `get_quote` reads the last sync cache; settlement syncs first.
 
 ### NEAR deltas
-
-- **Cached-reserve sync window.** A rebase that lands between two syncs is priced at the next settlement or at the next permissionless `sync_reserves`, not instantly. Every swap, liquidity add and withdrawal runs its own sync chain first. The window is the receipt-to-fill gap of one transaction. A sync started before a swap can never fill it.
-- **Taxed input is not a caller problem.** There is no router that has to over-send: `ft_transfer_call` reports the net amount the pool received, and the pool quotes from that.
-- **Gross, not net, swap events.** `PoolEvent::Swap.amount_out_gross` is what the pool sent. If the output token taxes the payout, the trader receives less, and the event does not pretend otherwise.
-- **Credited deposits are not reserves.** Balances credited by a deposit but not yet spent by `add_liquidity` are subtracted from the tradeable reserves. A swapper cannot spend another account's credit. They stay withdrawable through `withdraw_deposit`.
+- **Cached-reserve sync window.** Intermediate rebases price at the next settlement or permissionless `sync_reserves`. Every swap, add, and withdrawal syncs first within its transaction; prior syncs cannot fill later swaps.
+- **Taxed input is not a caller problem.** `ft_transfer_call` reports the net received amount, so no over-sending router is needed.
+- **Gross, not net, swap events.** `PoolEvent::Swap.amount_out_gross` records what the pool sent before any output token tax.
+- **Credited deposits are not reserves.** Credits unspent by `add_liquidity` stay withdrawable via `withdraw_deposit` and are excluded from tradeable reserves.
 
 ## The pool account is locked
-
-`scripts/deploy.sh` deletes every access key on the pool account after deployment and verifies that none remain. The contract has no method that adds a key, no owner, no pause and no upgrade path. After that transaction only the contract's own logic can move funds. Record the key-deletion transaction when a deployment is made; it is the evidence for the claim.
+`scripts/deploy.sh` deletes all pool access keys and verifies none remain. No method adds keys, and no owner, pause, or upgrade exists. Record the key-deletion transaction as deployment evidence.
 
 ## Test-only fixtures
-
-`contracts/mock-ft` is a fixture, not a token to deploy for value. One binary provides both behaviours the pool is built for. An index moves with `rebase(factor_bps)`. A transfer fee is set by `set_fee(bps)`. Both mutators are unauthenticated and `mint` is free. A test must fund an exact balance and change the index mid-run. The fixture exposes balances, supply, metadata, the index and the mutators. A test can read the same numbers the pool reads.
+`contracts/mock-ft` is an unauthenticated test fixture combining `rebase(factor_bps)`, `set_fee(bps)`, and free `mint`. It exposes balances, supply, metadata, index, and mutators for deterministic tests.
 
 ## Layout
-
 | Path | Contents |
 | --- | --- |
 | `contracts/pool/src/lib.rs` | contract state, `new`, metadata and credit views |
@@ -146,9 +101,7 @@ Holding real tokens costs more per settlement than an accounting-only design. Th
 | `manifest.json` | machine-readable pool description |
 
 ## Origin and licence
-
-krater is a NEAR port of [`nirholas/rebase-absorb`](https://github.com/nirholas/rebase-absorb) (Apache-2.0, HEAD `c1665553`), rewritten from Solidity into Rust and NEP-141. The origin's LICENSE and NOTICE are retained verbatim; see [`ATTRIBUTION.md`](ATTRIBUTION.md) for the change summary and the dependency licence table. The pool keeps the origin's commitments: no owner, no pause, no upgrade. Behaviour treats the tokens' own mechanics as the source of truth.
+krater ports [`nirholas/rebase-absorb`](https://github.com/nirholas/rebase-absorb) (Apache-2.0, HEAD `c1665553`) from Solidity to Rust and NEP-141, keeping LICENSE and NOTICE verbatim. See [`ATTRIBUTION.md`](ATTRIBUTION.md) for the change summary and dependency licences. The pool keeps no owner, no pause, and no upgrade.
 
 ## Hackathon
-
 Track: `memecoins`. Development ends 2026-11-14T23:59:00Z (UTC).
