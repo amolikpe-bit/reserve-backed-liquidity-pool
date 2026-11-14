@@ -61,7 +61,7 @@ Static gas makes client budgeting exact: the pool attaches 90/80/70/60 Tgas to t
 ## Limits, layout and origin
 - Holding real tokens costs more per settlement than accounting-only designs; tokens that freeze or seize balances can do so here, and a third-token airdrop cannot be recovered. Exact-output swaps are refused rather than approximated, because a taxed token cannot guarantee exact delivery, and a direct transfer donates to all shares.
 - `PoolEvent::Swap.amount_out_gross` records what the pool sent before any output token tax; credits unspent by `add_liquidity` stay withdrawable through `withdraw_deposit` and out of tradeable reserves.
-krater ports [`nirholas/rebase-absorb`](https://github.com/nirholas/rebase-absorb) (Apache-2.0) from Solidity to Rust and NEP-141, keeping `LICENSE` verbatim and `NOTICE` with the origin line corrected — see [`ATTRIBUTION.md`](ATTRIBUTION.md). Track: `memecoins`. Submission draft: [`SUBMISSION-PREP.md`](SUBMISSION-PREP.md).
+krater ports [`nirholas/rebase-absorb`](https://github.com/nirholas/rebase-absorb) (Apache-2.0) from Solidity to Rust and NEP-141, keeping `LICENSE` verbatim and `NOTICE` with the origin line corrected — see [`ATTRIBUTION.md`](ATTRIBUTION.md). Track: `defi`. Submission draft: [`SUBMISSION-PREP.md`](SUBMISSION-PREP.md).
 
 Q-015 (second project on this email): **subrosa** (private payroll, tracks `privacy`, `realworld`).
 
