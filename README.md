@@ -48,7 +48,7 @@ Requirements: Rust 1.100.0+, edition 2024, cargo-near 0.23.0, near-cli-rs 0.31.1
 ```bash
 git clone https://github.com/nirholas/near-krater && cd near-krater && cargo near build non-reproducible-wasm && node scripts/demo.js
 ```
-`scripts/demo.js` starts a near-sandbox chain, deploys both contracts, creates zero-balance accounts, and runs the full flow — no keys or funds needed. Call `storage_deposit` on both tokens and the pool first, because NEP-141 never registers receivers.
+`scripts/demo.js` starts a near-sandbox chain, deploys both contracts, creates zero-balance accounts, and runs the full flow — no keys or funds needed. Call `storage_deposit` on both tokens and the pool first, because NEP-141 never registers receivers. The clone target above is the published home of this tree; until it is pushed, run these steps from this local checkout.
 `non-reproducible-wasm` builds locally without Docker; `scripts/deploy.sh` builds both crates via `scripts/optimize-wasm.sh`, whose `wasm-opt -Oz --converge` cuts pool wasm from `275,053` to `269,972` bytes (−1.85%). Set `RPC_URL` and header variables for live networks.
 
 ## Executable spec
@@ -61,7 +61,7 @@ Static gas makes client budgeting exact: the pool attaches 90/80/70/60 Tgas to t
 ## Limits, layout and origin
 - Holding real tokens costs more per settlement than accounting-only designs; tokens that freeze or seize balances can do so here, and a third-token airdrop cannot be recovered. Exact-output swaps are refused rather than approximated, because a taxed token cannot guarantee exact delivery, and a direct transfer donates to all shares.
 - `PoolEvent::Swap.amount_out_gross` records what the pool sent before any output token tax; credits unspent by `add_liquidity` stay withdrawable through `withdraw_deposit` and out of tradeable reserves.
-krater ports [`nirholas/rebase-absorb`](https://github.com/nirholas/rebase-absorb) (Apache-2.0) from Solidity to Rust and NEP-141, keeping `LICENSE` verbatim and `NOTICE` with the origin line corrected — see [`ATTRIBUTION.md`](ATTRIBUTION.md). Track: `defi`. Submission draft: [`SUBMISSION-PREP.md`](SUBMISSION-PREP.md).
+krater ports [`nirholas/rebase-absorb`](https://github.com/nirholas/rebase-absorb) (Apache-2.0) from Solidity to Rust and NEP-141, keeping `LICENSE` verbatim and `NOTICE` with the origin line corrected — see [`ATTRIBUTION.md`](ATTRIBUTION.md). Track: `memecoins`. Submission draft: [`SUBMISSION-PREP.md`](SUBMISSION-PREP.md).
 
 Q-015 (second project on this email): **subrosa** (private payroll, tracks `privacy`, `realworld`).
 

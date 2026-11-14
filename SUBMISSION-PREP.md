@@ -1,6 +1,6 @@
 # SUBMISSION-PREP — krater (LOCAL DRAFT, NOT SUBMITTED)
 
-Track: `defi` (spec `p0-defi.md`). Deadline 2026-11-14T23:59:00Z.
+Track: `memecoins` (spec `p0-memecoins.md`). Deadline 2026-11-14T23:59:00Z.
 No push, no remote, no tags, no X post, no submit. Local commit only.
 
 ## Judge quickstart (do X → see Y), MEASURED pre-Celesto-only
@@ -58,13 +58,14 @@ same requestId.
 
 ## Rules checklist
 
-- Q-003: 7 pre-existing tags, none of the required pair; no README diff link.
-  **Not satisfied**; local tags deliberately not created.
+- Q-003: tags `pre-hackathon` and `hackathon-submission` exist locally (9 tags
+  total); not pushed, so the README compare link is not yet live.
 - Q-012 video required when judges cannot open the demo.
-- Q-014 `LICENSE` present. Q-017 README "Quickstart" at line 31,
-  "Executable spec" line 54, "Reproduce the numbers" line 67.
-- Q-015 second project on same email must be named in README. Unresolved.
-- Q-002/Q-005 origin disclosure: README "Origin and licence" line 148.
+- Q-014 `LICENSE` present. Q-017 README "Quickstart" at line 46,
+  "Executable spec" line 54, "Numbers, gas and limits" line 57.
+- Q-015 second project on same email must be named in README. Named: **subrosa**
+  (private payroll, tracks `privacy`, `realworld`).
+- Q-002/Q-005 origin disclosure: README "Limits, layout and origin" line 61.
 
 ## Blockers (do not block submission)
 

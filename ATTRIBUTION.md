@@ -19,6 +19,6 @@ krater ports the single-pool design from Solidity to Rust and NEP-141. The pool 
 
 `NOTICE` records only the origin build components. Nothing here is relicensed by that notice.
 ## Dependency licences
-near-sdk 5.30.2 and near-contract-standards 5.30.2 are Apache-2.0. near-sdk-contract-tools 4.0.0 is GPL-3.0 OR Apache-2.0, used under Apache-2.0.
-primitive-types 0.14.0 and near-api-js 7.5.3 are MIT OR Apache-2.0. near-sandbox 0.3.5, Node.js 26.13.1, and pnpm 12.18.0 follow their upstream licences.
+near-sdk 5.30.2 and near-contract-standards 5.30.2 are MIT OR Apache-2.0, used under Apache-2.0. near-sdk-contract-tools 4.0.0 is GPL-3.0 OR Apache-2.0, used under Apache-2.0.
+primitive-types 0.14.0 is MIT OR Apache-2.0; near-api-js 7.5.3 is MIT AND Apache-2.0. near-sandbox 0.3.5, Node.js 26.13.1, and pnpm 12.18.0 follow their upstream licences.
 The Rust dependencies are pinned in `Cargo.toml`, and the JavaScript dependencies are pinned in `package.json`.
