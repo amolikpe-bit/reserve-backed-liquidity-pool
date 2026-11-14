@@ -1,7 +1,6 @@
 # krater
 **A NEAR pool whose reserves are the real NEP-141 balances it holds.** Rebase, dividend, or taxed-transfer gains belong to the holders. No owner, pause, or upgrade path exists. Contract [`contracts/pool`](contracts/pool) (Rust, near-sdk 5.30.2), manifest [`manifest.json`](manifest.json), licence Apache-2.0.
 
-Tracks: `defi` · Baseline: tag `pre-hackathon` at `d6eafae` · diff `git diff pre-hackathon..hackathon-submission`.
 
 ```mermaid
 sequenceDiagram
@@ -42,9 +41,6 @@ sequenceDiagram
 ```
 
 ## Pool and shares
-The pool holds both pair tokens on its own account, so the balance is the reserve. No wrapper, claim token, or cached price reconciliation is needed.
-- A fee-on-transfer token is priced from what arrived, not from what was sent. A dividend or airdrop lands in the reserve and belongs to the shares.
-- The curve is constant-product with input-side fees. Views read a cached reserve; a permissionless sync chain refreshes it, and settlement always syncs before it trades.
 LP shares are NEP-141 on the pool account (`FungibleToken` supplies the NEP-145 storage methods). Settlement rides that standard: a holder calls `ft_transfer_call` on a pair token, the token calls `ft_on_transfer` on the pool, which quotes the reported net amount; an empty message credits a deposit that `add_liquidity` spends. Every event is NEP-297 JSON under `krater`.
 
 ## Quickstart
@@ -56,7 +52,6 @@ git clone https://github.com/nirholas/near-krater && cd near-krater && cargo nea
 `non-reproducible-wasm` builds locally without Docker; `scripts/deploy.sh` builds both crates via `scripts/optimize-wasm.sh`, whose `wasm-opt -Oz --converge` cuts pool wasm from `275,053` to `269,972` bytes (−1.85%). Set `RPC_URL` and header variables for live networks.
 
 ## Executable spec
-Each command starts a zero-funds sandbox and deploys both contracts. `node scripts/demo.js` runs deposit credits, add liquidity, quote, swap, rebase and sync, and withdraw, printing reserves, shares, the quote delta in bps, and the `Swap` count, and exits non-zero on failure.
 `node scripts/measure.js` measures gas per settlement path and the +10% rebase quote delta. `node --test --test-concurrency=1 tests/pool.test.js` covers the refund and owed path, `claim_owed`, `withdraw_deposit`, taxed legs, seeded fuzz, and unregistered payout receivers. `cargo check --workspace --target wasm32-unknown-unknown && cargo test -p krater-pool` compiles, runs unit tests, and builds wasm.
 
 ## Numbers, gas and limits
@@ -65,10 +60,7 @@ Static gas makes client budgeting exact: the pool attaches 90/80/70/60 Tgas to t
 
 ## Limits, layout and origin
 - Holding real tokens costs more per settlement than accounting-only designs; tokens that freeze or seize balances can do so here, and a third-token airdrop cannot be recovered. Exact-output swaps are refused rather than approximated, because a taxed token cannot guarantee exact delivery, and a direct transfer donates to all shares.
-- `get_quote` reads the last sync cache, so a cached reserve is stale until the next settlement or permissionless `sync_reserves`. `ft_transfer_call` reports the net received amount, so a taxed input needs no over-sending router.
 - `PoolEvent::Swap.amount_out_gross` records what the pool sent before any output token tax; credits unspent by `add_liquidity` stay withdrawable through `withdraw_deposit` and out of tradeable reserves.
-`contracts/mock-ft` is an unauthenticated test fixture combining `rebase(factor_bps)`, `set_fee(bps)`, and free `mint`. Pool internals (`contracts/pool/src/`): `lib.rs` state, `new`, and the metadata and credit views; `pool.rs` quote math; `shares.rs` share and credit arithmetic and `MINIMUM_SHARES`; `ft_receiver.rs` transfer messages; `events.rs` NEP-297 events.
-`scripts/demo.js` runs the sandbox or live end-to-end flow, `scripts/measure.js` measures gas and writes `bench.json`, `scripts/lib/harness.js` is the shared sandbox and RPC client, and `tests/pool.test.js` tests the deployed surface.
 krater ports [`nirholas/rebase-absorb`](https://github.com/nirholas/rebase-absorb) (Apache-2.0) from Solidity to Rust and NEP-141, keeping `LICENSE` verbatim and `NOTICE` with the origin line corrected — see [`ATTRIBUTION.md`](ATTRIBUTION.md). Track: `defi`. Submission draft: [`SUBMISSION-PREP.md`](SUBMISSION-PREP.md).
 
 Q-015 (second project on this email): **subrosa** (private payroll, tracks `privacy`, `realworld`).
