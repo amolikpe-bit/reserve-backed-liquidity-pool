@@ -13,23 +13,23 @@ import { Sandbox, DEFAULT_ACCOUNT_ID, DEFAULT_PRIVATE_KEY } from "near-sandbox";
 // Guard against an orphaned sandbox child. Node's --test-force-exit skips
 // after() hooks, so a sandbox child can survive the runner. Register each
 // sandbox and kill its child on process exit or on a termination signal.
-const liveSandboxes = new Set();
+const sandboxes = new Set();
 
-function killLiveSandboxes() {
-  for (const sandbox of liveSandboxes) {
+function killSandboxes() {
+  for (const sandbox of sandboxes) {
     try {
       sandbox.childProcess?.kill("SIGKILL");
     } catch {
       // The child already exited; nothing is left to stop.
     }
   }
-  liveSandboxes.clear();
+  sandboxes.clear();
 }
 
-process.once("exit", killLiveSandboxes);
+process.once("exit", killSandboxes);
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => {
-    killLiveSandboxes();
+    killSandboxes();
     process.exit(signal === "SIGINT" ? 130 : 143);
   });
 }
@@ -134,7 +134,7 @@ export function toYocto(near) {
 }
 
 // Near-zero recompute instrumentation: distinct inputs cached, not total calls.
-export const recomputeCounters = () => ({ gas: gasCache.size, yocto: yoctoCache.size });
+export const cacheCounts = () => ({ gas: gasCache.size, yocto: yoctoCache.size });
 
 export async function createAccount(provider, payer, accountId, nearAmount) {
   const keyPair = KeyPair.fromRandom("ED25519");
@@ -172,7 +172,7 @@ export async function bootSandbox({
   withCarol = false,
 } = {}) {
   const sandbox = await Sandbox.start({});
-  liveSandboxes.add(sandbox);
+  sandboxes.add(sandbox);
   const provider = new JsonRpcProvider({ url: sandbox.rpcUrl });
   const root = new Account(DEFAULT_ACCOUNT_ID, provider, DEFAULT_PRIVATE_KEY);
   const suffix = DEFAULT_ACCOUNT_ID;

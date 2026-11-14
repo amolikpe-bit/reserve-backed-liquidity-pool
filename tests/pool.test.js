@@ -22,7 +22,7 @@ import { Sandbox, DEFAULT_ACCOUNT_ID, DEFAULT_PRIVATE_KEY } from "near-sandbox";
 import {
   call,
   callRaw,
-  createAccount as createHarnessAccount,
+  createAccount as newAccount,
   deploy,
   logsOf,
   readWasm,
@@ -76,7 +76,7 @@ function view(contractId, method, args = {}) {
 }
 
 function createAccount(root, accountId, nearAmount) {
-  return createHarnessAccount(provider, root, accountId, nearAmount);
+  return newAccount(provider, root, accountId, nearAmount);
 }
 
 
@@ -84,7 +84,7 @@ function createAccount(root, accountId, nearAmount) {
 // A flow may end with a token leg the pool handles in a callback. The outer
 // call succeeds and the failed leg is expected, so keep the final status
 // instead of throwing; the caller asserts the resulting `owed` state.
-function callExpectingFailedLeg(
+function callFailedLeg(
   account,
   contractId,
   methodName,
@@ -549,7 +549,7 @@ describe("W2 flows", { concurrency: 1 }, () => {
       carried,
     );
 
-    await callExpectingFailedLeg(carol, poolId, "withdraw", { shares: carried.toString() },
+    await callFailedLeg(carol, poolId, "withdraw", { shares: carried.toString() },
       { gas: 300, deposit: "1" });
 
     const backlog = (await view(poolId, "get_payout_backlog", { account_id: carolId }))
@@ -979,7 +979,7 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
     await call(dave, taxedId, "storage_unregister", {}, { gas: 30, deposit: "1" });
     const poolBefore = BigInt(await view(taxedId, "ft_balance_of", { account_id: poolId }));
 
-    const outcome = await callExpectingFailedLeg(dave, poolId, "withdraw_deposit", {
+    const outcome = await callFailedLeg(dave, poolId, "withdraw_deposit", {
       token: taxedId,
       amount: amount.toString(),
     }, { gas: 100, deposit: "1" });
@@ -1045,7 +1045,7 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
     }
     await call(dave, rebasingId, "storage_unregister", {}, { gas: 30, deposit: "1" });
 
-    const withdrawOutcome = await callExpectingFailedLeg(dave, poolId, "withdraw", {
+    const withdrawOutcome = await callFailedLeg(dave, poolId, "withdraw", {
       shares: shares.toString(),
     }, { gas: 300, deposit: "1" });
     const withdrawEvent = kraterEventOf(withdrawOutcome, "withdraw");
@@ -1063,7 +1063,7 @@ describe("W3 regression matrix", { concurrency: 1 }, () => {
 
     // Claim while the payout token is still refused: the callback must put the
     // owed amount and its reserve back.
-    await callExpectingFailedLeg(dave, poolId, "claim_owed", {
+    await callFailedLeg(dave, poolId, "claim_owed", {
       token: rebasingId,
     }, { gas: 100, deposit: "1" });
     backlog = (await view(poolId, "get_payout_backlog", { account_id: daveId })).map(BigInt);
