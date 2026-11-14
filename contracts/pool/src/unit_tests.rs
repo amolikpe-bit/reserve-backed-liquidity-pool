@@ -9,8 +9,8 @@
 
 use crate::pool::quote_from_with_fee;
 use crate::shares::{
-    credit_nominal, credit_shares, credit_shares_ceil, initial_shares, proportional_shares,
-    MINIMUM_SHARES, ONE,
+    MINIMUM_SHARES, ONE, credit_nominal, credit_shares, credit_shares_ceil, initial_shares,
+    proportional_shares,
 };
 
 const E18: u128 = 1_000_000_000_000_000_000;
@@ -27,7 +27,10 @@ fn quote_reference_vector() {
 /// truncation of `99_700_000 * 2_000_000 / 10_099_700_000`.
 #[test]
 fn quote_larger_input_vector() {
-    assert_eq!(quote_from_with_fee(1_000_000, 2_000_000, 10_000, 30), 19_743);
+    assert_eq!(
+        quote_from_with_fee(1_000_000, 2_000_000, 10_000, 30),
+        19_743
+    );
 }
 
 /// Zero input quotes zero; the fee can only reduce the output of a nonzero input.

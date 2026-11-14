@@ -73,9 +73,7 @@ pub fn proportional_amount_ceil(shares: u128, reserve: u128, supply: u128) -> u1
     }
     // `(n - 1) / d + 1` is `ceil(n / d)` and cannot overflow the way
     // `(n + d - 1) / d` can when both operands sit near `u128::MAX`.
-    narrow(
-        (numerator - U256::from(1u128)) / U256::from(supply) + U256::from(1u128),
-    )
+    narrow((numerator - U256::from(1u128)) / U256::from(supply) + U256::from(1u128))
 }
 
 /// Credit shares for a nominal deposit: `amount * ONE / index`, rounded down.

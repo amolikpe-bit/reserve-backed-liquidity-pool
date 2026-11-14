@@ -30,14 +30,14 @@
 //! call refunds the flow instead of leaving a slot no later call would drain.
 
 use near_sdk::json_types::U128;
-use near_sdk::{env, near, AccountId, Gas, Promise, PromiseError, PromiseOrValue};
+use near_sdk::{AccountId, Gas, Promise, PromiseError, PromiseOrValue, env, near};
 use primitive_types::U256;
 
 use crate::events::PoolEvent;
 use crate::{
-    resolve_index, shares, Contract, ContractExt, GAS_DISPATCH_HEADROOM, GAS_FOR_FILL,
-    GAS_FOR_ON_BALANCE_A, GAS_FOR_ON_BALANCE_B, GAS_FOR_ON_INDEX_A, GAS_FOR_ON_INDEX_B,
-    GAS_FOR_SETTLE, GAS_FOR_SYNC_CALLBACK, GAS_FOR_TOKEN_VIEW, BPS,
+    BPS, Contract, ContractExt, GAS_DISPATCH_HEADROOM, GAS_FOR_FILL, GAS_FOR_ON_BALANCE_A,
+    GAS_FOR_ON_BALANCE_B, GAS_FOR_ON_INDEX_A, GAS_FOR_ON_INDEX_B, GAS_FOR_SETTLE,
+    GAS_FOR_SYNC_CALLBACK, GAS_FOR_TOKEN_VIEW, resolve_index, shares,
 };
 
 /// Narrow a `U256` to `u128`, panicking with a named error instead of truncating.
@@ -57,12 +57,7 @@ pub(crate) fn narrow(value: U256) -> u128 {
 /// quote zero, which is what lets `fill_swap` turn "no price yet" into a refund
 /// instead of a panic. `get_quote` layers the view's documented `NoReserves`
 /// panic on top.
-pub(crate) fn quote_from_with_fee(
-    r_in: u128,
-    r_out: u128,
-    amount_in: u128,
-    fee_bps: u32,
-) -> u128 {
+pub(crate) fn quote_from_with_fee(r_in: u128, r_out: u128, amount_in: u128, fee_bps: u32) -> u128 {
     if r_in == 0 || r_out == 0 || amount_in == 0 {
         return 0;
     }
@@ -157,10 +152,9 @@ impl Contract {
         match r {
             Ok(balance) => {
                 let side = &mut self.sides[0];
-                side.reserve = balance.0.saturating_sub(shares::credit_nominal(
-                    side.credit_shares,
-                    side.index,
-                ));
+                side.reserve = balance
+                    .0
+                    .saturating_sub(shares::credit_nominal(side.credit_shares, side.index));
                 PromiseOrValue::Promise(self.index_hop_b(allow_fill))
             }
             Err(err) => {
@@ -188,10 +182,9 @@ impl Contract {
         match r {
             Ok(balance) => {
                 let side = &mut self.sides[1];
-                side.reserve = balance.0.saturating_sub(shares::credit_nominal(
-                    side.credit_shares,
-                    side.index,
-                ));
+                side.reserve = balance
+                    .0
+                    .saturating_sub(shares::credit_nominal(side.credit_shares, side.index));
                 PoolEvent::ReservesSynced {
                     reserve_a: U128(self.sides[0].reserve),
                     reserve_b: U128(self.sides[1].reserve),
@@ -465,5 +458,8 @@ impl Contract {
 /// this receipt has left, plus [`GAS_DISPATCH_HEADROOM`] for the state write and the
 /// promise batch it still owes.
 fn can_fund(needed: Gas) -> bool {
-    crate::remaining_gas() > needed.as_gas().saturating_add(GAS_DISPATCH_HEADROOM.as_gas())
+    crate::remaining_gas()
+        > needed
+            .as_gas()
+            .saturating_add(GAS_DISPATCH_HEADROOM.as_gas())
 }

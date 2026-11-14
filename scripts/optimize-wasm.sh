@@ -19,9 +19,9 @@ fi
 before="$(stat -c%s "$wasm")"
 wasm-opt -Oz --converge --enable-nontrapping-float-to-int --enable-bulk-memory \
   --enable-sign-ext --reorder-functions --reorder-locals --reorder-globals \
-  "$wasm" -o "$tmp"
+  --optimize-instructions --rse "$wasm" -o "$tmp"
 mv "$tmp" "$wasm"
 after="$(stat -c%s "$wasm")"
 
-printf 'wasm-opt -Oz --converge + reorder (near features): %s -> %s bytes (%s%%)\n' "$before" "$after" \
+printf 'wasm-opt -Oz --converge + reorder/optinstr/rse (near features): %s -> %s bytes (%s%%)\n' "$before" "$after" \
   "$(awk -v b="$before" -v a="$after" 'BEGIN { printf "%.3f", (a - b) * 100 / b }')"

@@ -22,14 +22,14 @@
 
 use near_sdk::json_types::U128;
 use near_sdk::{
-    assert_one_yocto, env, near, require, serde_json, AccountId, Promise, PromiseError,
-    PromiseOrValue,
+    AccountId, Promise, PromiseError, PromiseOrValue, assert_one_yocto, env, near, require,
+    serde_json,
 };
 
 use crate::events::PoolEvent;
 use crate::{
-    resolve_index, shares, Contract, ContractExt, GAS_FOR_DEPOSIT_INDEX,
-    GAS_FOR_DEPOSIT_METADATA, GAS_FOR_SYNC_CALLBACK, GAS_FOR_TOKEN_VIEW, GAS_FOR_WITHDRAW_INDEX,
+    Contract, ContractExt, GAS_FOR_DEPOSIT_INDEX, GAS_FOR_DEPOSIT_METADATA, GAS_FOR_SYNC_CALLBACK,
+    GAS_FOR_TOKEN_VIEW, GAS_FOR_WITHDRAW_INDEX, resolve_index, shares,
 };
 
 /// Decimals assumed for a token whose NEP-148 metadata cannot be read.
@@ -44,7 +44,6 @@ pub enum PoolMsg {
     /// Credit the transferred amount to the sender, to be added later.
     Deposit {},
 }
-
 
 /// NEP-148 metadata, reduced to the one field the deposit floor needs.
 ///
@@ -158,9 +157,9 @@ impl Contract {
     ) -> PromiseOrValue<U128> {
         let index = resolve_index(r, "deposit token index");
         match self.decimals_of(&token) {
-            Some(decimals) => PromiseOrValue::Value(U128(self.credit_deposit(
-                &sender_id, &token, amount.0, index, decimals,
-            ))),
+            Some(decimals) => PromiseOrValue::Value(U128(
+                self.credit_deposit(&sender_id, &token, amount.0, index, decimals),
+            )),
             None => PromiseOrValue::Promise(
                 crate::ext_ft::ext(token.clone())
                     .with_static_gas(GAS_FOR_TOKEN_VIEW)

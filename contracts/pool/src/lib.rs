@@ -31,8 +31,8 @@ mod unit_tests;
 use near_sdk::json_types::U128;
 use near_sdk::store::LookupMap;
 use near_sdk::{
-    assert_one_yocto, env, ext_contract, near, require, AccountId, Gas, NearToken, PanicOnDefault,
-    Promise, PromiseError,
+    AccountId, Gas, NearToken, PanicOnDefault, Promise, PromiseError, assert_one_yocto, env,
+    ext_contract, near, require,
 };
 use near_sdk_contract_tools::ft::{
     ContractMetadata, FungibleToken, Nep141Burn, Nep141Controller, Nep141Mint, Nep145Controller,
@@ -58,7 +58,8 @@ pub(crate) fn account_ref(account_id: &AccountId) -> &near_sdk::AccountIdRef {
 pub const BPS: u128 = 10_000;
 
 /// Machine-readable description of this pool, served from the repository.
-pub const SPEC_URI: &str = "https://raw.githubusercontent.com/nirholas/near-krater/main/manifest.json";
+pub const SPEC_URI: &str =
+    "https://raw.githubusercontent.com/nirholas/near-krater/main/manifest.json";
 
 /// The one yoctoNEAR NEP-141 requires on `ft_transfer`, and the deposit that makes
 /// an entry point a signed, non-delegable call rather than a plain function call.
@@ -279,8 +280,18 @@ impl Contract {
             token_b,
             swap_fee_bps,
             sides: [
-                TokenSide { reserve: 0, index: shares::ONE, credit_shares: 0, decimals: None },
-                TokenSide { reserve: 0, index: shares::ONE, credit_shares: 0, decimals: None },
+                TokenSide {
+                    reserve: 0,
+                    index: shares::ONE,
+                    credit_shares: 0,
+                    decimals: None,
+                },
+                TokenSide {
+                    reserve: 0,
+                    index: shares::ONE,
+                    credit_shares: 0,
+                    decimals: None,
+                },
             ],
             deposits: LookupMap::new(b"d".to_vec()),
             owed: LookupMap::new(b"o".to_vec()),
@@ -292,7 +303,10 @@ impl Contract {
 
         contract.set_metadata(&ContractMetadata::new(share_name, share_symbol, 18));
         contract
-            .deposit_to_storage_account(account_ref(&env::current_account_id()), POOL_STORAGE_DEPOSIT)
+            .deposit_to_storage_account(
+                account_ref(&env::current_account_id()),
+                POOL_STORAGE_DEPOSIT,
+            )
             .unwrap_or_else(|_| env::panic_str("StorageDepositError"));
 
         contract
@@ -316,10 +330,16 @@ impl Contract {
     /// The pool's tags: a constant-product curve over tokens that rebase or tax
     /// transfers, with no admin surface.
     pub fn pool_tags(&self) -> Vec<String> {
-        ["curve", "rebasing", "fee-on-transfer", "custom-curve", "no-admin"]
-            .iter()
-            .map(|tag| (*tag).to_string())
-            .collect()
+        [
+            "curve",
+            "rebasing",
+            "fee-on-transfer",
+            "custom-curve",
+            "no-admin",
+        ]
+        .iter()
+        .map(|tag| (*tag).to_string())
+        .collect()
     }
 
     /// Nominal credit balances for `account_id`, in `[token_a, token_b]` order.
@@ -351,11 +371,12 @@ impl Contract {
     /// Claim them with `claim_owed`.
     pub fn get_payout_backlog(&self, account_id: AccountId) -> Vec<U128> {
         vec![
-            U128(self
-                .owed
-                .get(&(account_id.clone(), self.token_a.clone()))
-                .copied()
-                .unwrap_or(0)),
+            U128(
+                self.owed
+                    .get(&(account_id.clone(), self.token_a.clone()))
+                    .copied()
+                    .unwrap_or(0),
+            ),
             U128(
                 self.owed
                     .get(&(account_id, self.token_b.clone()))
@@ -407,7 +428,7 @@ impl Contract {
         let plan = match self.plan_add(&add) {
             Ok(plan) => plan,
             Err(reason) => {
-                self.fail_add_liquidity(&add.owner_id, reason);
+                self.fail_add(&add.owner_id, reason);
                 return;
             }
         };
@@ -419,7 +440,7 @@ impl Contract {
         if Nep145Controller::get_storage_balance(self, account_ref(&plan.owner)).is_err()
             || Nep145Controller::get_storage_balance(self, account_ref(&pool_id)).is_err()
         {
-            self.fail_add_liquidity(&plan.owner, "ReceiverNotRegistered");
+            self.fail_add(&plan.owner, "ReceiverNotRegistered");
             return;
         }
 
@@ -434,7 +455,7 @@ impl Contract {
             if let Err(err) = self.mint(&Nep141Mint::new(MINIMUM_SHARES, account_ref(&pool_id))) {
                 env::log_str(&format!("locked share mint failed: {err:?}"));
                 self.restore_add(&plan);
-                self.fail_add_liquidity(&plan.owner, "DepositError");
+                self.fail_add(&plan.owner, "DepositError");
                 return;
             }
         }
@@ -446,19 +467,18 @@ impl Contract {
                 // burn is only refused by a broken ledger, and a panic here would
                 // revert this receipt's `take`, leaving the slot set for good, so
                 // a log keeps the receipt atomic with the refund below.
-                if let Err(err) =
-                    self.burn(&Nep141Burn::new(MINIMUM_SHARES, account_ref(&pool_id)))
+                if let Err(err) = self.burn(&Nep141Burn::new(MINIMUM_SHARES, account_ref(&pool_id)))
                 {
                     env::log_str(&format!("locked share unwind failed: {err:?}"));
                 }
             }
             self.restore_add(&plan);
-            self.fail_add_liquidity(&plan.owner, "DepositError");
+            self.fail_add(&plan.owner, "DepositError");
             return;
         }
 
-        self.emit_credit_spent(&plan.owner, &plan.token_a, plan.nominal_a);
-        self.emit_credit_spent(&plan.owner, &plan.token_b, plan.nominal_b);
+        self.emit_spent(&plan.owner, &plan.token_a, plan.nominal_a);
+        self.emit_spent(&plan.owner, &plan.token_b, plan.nominal_b);
         PoolEvent::Deposit {
             who: plan.owner.clone(),
             amount_a: U128(plan.nominal_a),
@@ -528,7 +548,10 @@ impl Contract {
             return;
         }
 
-        if let Err(err) = self.burn(&Nep141Burn::new(pending.shares, account_ref(&pending.owner_id))) {
+        if let Err(err) = self.burn(&Nep141Burn::new(
+            pending.shares,
+            account_ref(&pending.owner_id),
+        )) {
             env::log_str(&format!("share burn failed: {err:?}"));
             return;
         }
@@ -546,12 +569,12 @@ impl Contract {
         }
         .emit();
 
-        self.pay_withdraw_leg(&token_a, &pending.owner_id, amount_a);
-        self.pay_withdraw_leg(&token_b, &pending.owner_id, amount_b);
+        self.pay_leg(&token_a, &pending.owner_id, amount_a);
+        self.pay_leg(&token_b, &pending.owner_id, amount_b);
     }
 
     /// Send one withdrawal leg and record it as owed if the token refuses it.
-    fn pay_withdraw_leg(&self, token: &AccountId, owner: &AccountId, amount: u128) {
+    fn pay_leg(&self, token: &AccountId, owner: &AccountId, amount: u128) {
         if amount == 0 {
             return;
         }
@@ -601,16 +624,11 @@ impl Contract {
         require!(amount != 0, "AmountTooSmall");
         self.sub_reserve(&token, amount);
 
-        self.transfer_with_owed_restore(&token, &who, amount)
+        self.send_or_owe(&token, &who, amount)
     }
 
     /// Transfer `amount` and re-record it as owed if the token refuses the payout.
-    fn transfer_with_owed_restore(
-        &self,
-        token: &AccountId,
-        recipient: &AccountId,
-        amount: u128,
-    ) -> Promise {
+    fn send_or_owe(&self, token: &AccountId, recipient: &AccountId, amount: u128) -> Promise {
         token_transfer(token, recipient, amount).then(
             Contract::ext_self()
                 .with_static_gas(GAS_FOR_SYNC_CALLBACK)
@@ -663,10 +681,9 @@ struct AddPlan {
 /// panic there would revert the take and leave the slot set for good. A cost
 /// above `u128::MAX` can never be covered by a `u128` credit, so the add is
 /// refused as a short credit before the helper is called.
-fn credit_cost_fits(amount: u128, index: u128) -> bool {
+fn cost_fits(amount: u128, index: u128) -> bool {
     index != 0
-        && U256::from(amount) * U256::from(shares::ONE)
-            <= U256::from(index) * U256::from(u128::MAX)
+        && U256::from(amount) * U256::from(shares::ONE) <= U256::from(index) * U256::from(u128::MAX)
 }
 
 /// Whether the shares an add would mint fit in `u128`:
@@ -819,10 +836,14 @@ impl Contract {
         token: &AccountId,
         credit_shares: u128,
     ) {
-        let held = self.credit_of(account_id, token).saturating_sub(credit_shares);
+        let held = self
+            .credit_of(account_id, token)
+            .saturating_sub(credit_shares);
         self.set_credit(account_id, token, held);
 
-        let total = self.total_credit_shares(token).saturating_sub(credit_shares);
+        let total = self
+            .total_credit_shares(token)
+            .saturating_sub(credit_shares);
         self.set_total_credit_shares(token, total);
     }
 
@@ -882,7 +903,7 @@ impl Contract {
             .saturating_add(GAS_FOR_SYNC_CALLBACK.as_gas())
             .saturating_add(GAS_DISPATCH_HEADROOM.as_gas());
         if remaining_gas() > budget {
-            self.transfer_with_owed_restore(token, recipient, amount).detach();
+            self.send_or_owe(token, recipient, amount).detach();
             return true;
         }
 
@@ -917,8 +938,7 @@ impl Contract {
         // `credit_shares_ceil` narrows a `U256` to `u128` and panics outside the
         // range; this function runs after the slot was taken, so an unrepresentable
         // cost is refused as a short credit instead: no `u128` credit can cover it.
-        if !credit_cost_fits(add.amount_a, index_a) || !credit_cost_fits(add.amount_b, index_b)
-        {
+        if !cost_fits(add.amount_a, index_a) || !cost_fits(add.amount_b, index_b) {
             return Err("InsufficientDeposit");
         }
         if credit_a < shares::credit_shares_ceil(add.amount_a, index_a)
@@ -1001,7 +1021,7 @@ impl Contract {
     }
 
     /// Emit `CreditSpent` when a credit leg actually spent something.
-    fn emit_credit_spent(&self, account_id: &AccountId, token: &AccountId, amount: u128) {
+    fn emit_spent(&self, account_id: &AccountId, token: &AccountId, amount: u128) {
         if amount > 0 {
             PoolEvent::CreditSpent {
                 account_id: account_id.clone(),
@@ -1013,7 +1033,7 @@ impl Contract {
     }
 
     /// Emit `AddLiquidityFailed` with the reason the add could not mint.
-    fn fail_add_liquidity(&self, account_id: &AccountId, reason: &str) {
+    fn fail_add(&self, account_id: &AccountId, reason: &str) {
         env::log_str(&format!("add_liquidity failed: {reason}"));
         PoolEvent::AddLiquidityFailed {
             account_id: account_id.clone(),

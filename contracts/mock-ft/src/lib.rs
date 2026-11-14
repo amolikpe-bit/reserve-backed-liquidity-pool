@@ -23,19 +23,17 @@
 //! different amount than the one the sender asked to move, while the generated
 //! `ft_transfer_call` always reports the gross amount.
 
-use near_contract_standards::fungible_token::events::{FtBurn, FtMint, FtTransfer};
-use near_contract_standards::fungible_token::metadata::{
-    FungibleTokenMetadata, FT_METADATA_SPEC,
-};
-use near_contract_standards::fungible_token::receiver::ext_ft_receiver;
 use near_contract_standards::fungible_token::FungibleToken;
+use near_contract_standards::fungible_token::events::{FtBurn, FtMint, FtTransfer};
+use near_contract_standards::fungible_token::metadata::{FT_METADATA_SPEC, FungibleTokenMetadata};
+use near_contract_standards::fungible_token::receiver::ext_ft_receiver;
 use near_contract_standards::storage_management::{
     StorageBalance, StorageBalanceBounds, StorageManagement,
 };
 use near_sdk::json_types::U128;
 use near_sdk::{
-    assert_one_yocto, env, near, require, AccountId, Gas, NearToken, PanicOnDefault, Promise,
-    PromiseError,
+    AccountId, Gas, NearToken, PanicOnDefault, Promise, PromiseError, assert_one_yocto, env, near,
+    require,
 };
 use primitive_types::U256;
 
@@ -113,10 +111,9 @@ impl Contract {
     /// Panics if `account_id` never called `storage_deposit`: an unregistered
     /// NEP-141 receiver has nowhere to put the shares.
     fn registered_shares(&self, account_id: &AccountId) -> u128 {
-        self.token
-            .accounts
-            .get(account_id)
-            .unwrap_or_else(|| env::panic_str(&format!("The account {account_id} is not registered")))
+        self.token.accounts.get(account_id).unwrap_or_else(|| {
+            env::panic_str(&format!("The account {account_id} is not registered"))
+        })
     }
 
     /// Move `amount` nominal from `sender` to `receiver`, burning the fee.
@@ -133,7 +130,10 @@ impl Contract {
         amount: u128,
         memo: Option<&str>,
     ) -> u128 {
-        require!(sender != receiver, "Sender and receiver should be different");
+        require!(
+            sender != receiver,
+            "Sender and receiver should be different"
+        );
 
         let index = self.index;
         let fee = narrow(U256::from(amount) * U256::from(self.fee_bps as u128) / U256::from(BPS));
@@ -172,7 +172,12 @@ impl Contract {
         }
         .emit();
         if fee_shares > 0 {
-            FtBurn { owner_id: sender, amount: U128(burned), memo: None }.emit();
+            FtBurn {
+                owner_id: sender,
+                amount: U128(burned),
+                memo: None,
+            }
+            .emit();
         }
 
         credited
@@ -226,7 +231,6 @@ impl Contract {
         U128(self.index)
     }
 
-
     /// Move the index by `factor_bps`. 10_000 leaves balances unchanged, 11_000
     /// adds ten percent, 5_000 halves them.
     ///
@@ -234,8 +238,7 @@ impl Contract {
     /// `InvalidIndex` if the new index would be zero; a rebase to zero would erase
     /// every balance and cannot be undone.
     pub fn rebase(&mut self, factor_bps: u32) {
-        let next =
-            U256::from(self.index) * U256::from(factor_bps as u128) / U256::from(BPS);
+        let next = U256::from(self.index) * U256::from(factor_bps as u128) / U256::from(BPS);
         require!(next != U256::zero(), "InvalidIndex");
         self.index = narrow(next);
     }

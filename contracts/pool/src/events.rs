@@ -9,7 +9,7 @@
 //! `CreditWithdrawn` are the only way an indexer can follow them.
 
 use near_sdk::json_types::U128;
-use near_sdk::{near, AccountId};
+use near_sdk::{AccountId, near};
 
 /// Everything the pool emits.
 #[near(event_json(standard = "krater"))]
