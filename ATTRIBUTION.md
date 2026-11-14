@@ -1,7 +1,7 @@
 # Attribution
 ## Origin
 Repository: <https://github.com/nirholas/rebase-absorb> | Licence: Apache-2.0 | Baseline: `main` at `c1665553` (last commit 2026-10-10)
-Retained verbatim: `LICENSE` and `NOTICE`.
+Retained verbatim: `LICENSE`. `NOTICE` keeps the upstream third-party list, and its header now names the origin above.
 
 krater ports the single-pool design from Solidity to Rust and NEP-141. The pool holds both pair tokens as its reserves. Settlement measures the arrived balance. There is no owner, pause, or upgrade path.
 ## Changes made
