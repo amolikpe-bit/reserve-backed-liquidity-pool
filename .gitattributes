@@ -1,0 +1,3 @@
+# Keep LF in the index and in `git archive` output on every platform, so a
+# Windows checkout (core.autocrlf=true) cannot inject CRLF into a Linux build.
+* text=auto eol=lf
