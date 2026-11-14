@@ -110,6 +110,8 @@ The client attaches 200 Tgas to `ft_transfer_call`, and 300 Tgas to `add_liquidi
 `scripts/demo.js` runs the sandbox or live end-to-end flow. `scripts/measure.js` measures gas and the rebase delta and writes `bench.json`. `scripts/lib/harness.js` is the shared sandbox and RPC client for demo, measure, and tests. `tests/pool.test.js` tests the deployed surface. `manifest.json` is the machine-readable pool description.
 krater ports [`nirholas/rebase-absorb`](https://github.com/nirholas/rebase-absorb) (Apache-2.0) from Solidity to Rust and NEP-141, keeping `LICENSE` verbatim and `NOTICE` with the origin line corrected. See [`ATTRIBUTION.md`](ATTRIBUTION.md) for the change summary and dependency licences. Track: `defi`. Local submission draft: [`SUBMISSION-PREP.md`](SUBMISSION-PREP.md).
 
+Q-015 (second project on this email): **subrosa** (private payroll, tracks `privacy`, `realworld`).
+
 ## Baseline and disclosure
 
 Baseline: tag `pre-hackathon` marks the imported tree at `d6eafae`. The upstream project is `nirholas/rebase-absorb`.
