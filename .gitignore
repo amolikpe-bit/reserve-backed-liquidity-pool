@@ -3,6 +3,7 @@ target/
 
 # Node
 node_modules/
+dist/
 
 # Environment and secrets
 .env
@@ -11,9 +12,32 @@ node_modules/
 *.pem
 *.key
 
-# Logs and OS files
+# Logs, runtime and test output
 *.log
+evidence/*.log
+coverage/
+.coverage
+htmlcov/
+.pytest_cache/
+bench.json
+*.out
+*.err
 .DS_Store
+
+# Tool caches
+.cache/
+.turbo/
+.parcel-cache/
+*.tsbuildinfo
+__pycache__/
+.mypy_cache/
+.ruff_cache/
+
+# Markdown and doc temporaries
+*.md.bak
+*.md.tmp
+*.md.orig
+.~*
 
 # Compiled contract artifacts outside the build directory
 *.wasm
