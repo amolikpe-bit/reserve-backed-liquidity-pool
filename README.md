@@ -1,5 +1,6 @@
 # krater
 **A NEAR pool whose reserves are the real NEP-141 balances it holds.** Rebase, dividend, or taxed-transfer gains belong to the holders. No owner, pause, or upgrade path exists. Contract [`contracts/pool`](contracts/pool) (Rust, near-sdk 5.30.2), manifest [`manifest.json`](manifest.json), licence Apache-2.0.
+Tracks: `defi`. Baseline: tag `pre-hackathon` marks the imported tree at `d6eafae` (upstream `nirholas/rebase-absorb`).
 
 ```mermaid
 sequenceDiagram
@@ -94,6 +95,24 @@ git clone https://github.com/nirholas/near-krater && cd near-krater && cargo nea
 ## Executable spec
 Each command starts a zero-funds sandbox and deploys both contracts. `node scripts/demo.js` runs deposit credits, add liquidity, quote, swap, rebase and sync, and withdraw. It prints reserves, shares, the quote delta in bps, and the `Swap` count, and exits non-zero on failure.
 `node scripts/measure.js` measures gas for each settlement path and the +10% rebase quote delta. `node --test --test-concurrency=1 tests/pool.test.js` covers the refund and owed path, `claim_owed`, `withdraw_deposit`, taxed legs, and seeded fuzz, plus refund and claim paths for unregistered payout receivers. `cargo check --workspace --target wasm32-unknown-unknown && cargo test -p krater-pool` compiles, runs unit tests, and builds wasm.
+
+### Repro steps
+1. Build the wasm: do `cargo near build non-reproducible-wasm` → see `target/near/krater_pool/krater_pool.wasm` and `target/near/krater_mock_ft/krater_mock_ft.wasm` exist.
+2. Run the end-to-end demo: do `node scripts/demo.js` → see `krater demo ok (sandbox): pool.<id>`.
+3. Measure gas and the rebase delta: do `node scripts/measure.js` → see `bench.json` written and `get_quote` rise from `9.920546077802156251e18` to `1.0912600685582371876e19` on a +10% rebase (+9.99%).
+4. Run the surface tests: do `node --test --test-concurrency=1 tests/pool.test.js` → see 35 tests, 0 fail.
+5. One-contract deploy oracle: do `POOL_WASM=target/near/krater_pool/krater_pool.wasm MOCK_FT_WASM=target/near/krater_mock_ft/krater_mock_ft.wasm node scripts/smoke.mjs` → see `DEPLOY_OK pool_name="krater" pool_version="1.0.0"`.
+
+## Claim → evidence
+
+| Claim | Evidence |
+|---|---|
+| No owner, pause, or upgrade path | `contracts/pool/src/lib.rs:6-7` ("The pool has no owner, no pause and no upgrade path"); no `pause`/`upgrade` method exists in `contracts/pool/src` |
+| Reserves are the real NEP-141 balances held | `contracts/pool/src/pool.rs:79` `get_reserves`, `contracts/pool/src/pool.rs:110` `sync_reserves`; test `tests/pool.test.js:472` "a rebase is priced after sync_reserves" |
+| Quote delta +9.99% on a +10% rebase | `scripts/measure.js`; numbers above reproduced per run |
+| Taxed transfers priced from what arrived | test `tests/pool.test.js:1198` "taxed token reports net" |
+| Failed payouts become withdrawable owed | test `tests/pool.test.js:555` "a failed payout becomes owed and claim_owed clears it" |
+| 35 surface tests, 0 fail | `node --test --test-concurrency=1 tests/pool.test.js` |
 
 ## Numbers, gas and limits
 Run `node scripts/measure.js`. A +10% rebase raises `get_quote` by 9.99% in one sandbox run, from `9.920546077802156251e18` to `1.0912600685582371876e19` base units. The script writes `bench.json` and prints each path. Measured gas: `add_liquidity` 21.397 Tgas, `sync_reserves` 17.250 Tgas, and `withdraw` 28.635 Tgas. Also `swap` 28.110 Tgas, `withdraw_deposit` 10.356 Tgas, and `claim_owed` 6.478 Tgas. Gas sums the transaction `gas_burnt` and every receipt `gas_burnt`. Live runs need fixture accounts and two funded keys. The quote delta is deterministic. Gas varies slightly across node schedules.
