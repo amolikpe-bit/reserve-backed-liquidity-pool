@@ -31,11 +31,11 @@ import {
   GAS,
   POOL_WASM,
   MOCK_FT_WASM,
+  ONE as E18,
+  TOKEN_SCALE as FUND,
 } from "../scripts/lib/harness.js";
 const SPEC_URI = "https://raw.githubusercontent.com/nirholas/near-krater/main/manifest.json";
 const TAGS = ["curve", "rebasing", "fee-on-transfer", "custom-curve", "no-admin"];
-const E18 = 10n ** 18n;
-const FUND = 1_000n * E18;
 const SEED = 200n * E18;
 
 // Origin constants (the origin's hook test suite): 30 bps swap fee, 200 bps
@@ -220,9 +220,16 @@ before(async () => {
 });
 
 after(async () => {
-  if (sandbox) {
-    await sandbox.tearDown();
-  }
+  const active = sandbox;
+  if (!active) return;
+  await Promise.race([
+    active.tearDown().catch(() => {}),
+    new Promise((resolve) => {
+      const timer = setTimeout(resolve, 15_000);
+      timer.unref();
+    }),
+  ]);
+  active.childProcess?.kill("SIGKILL");
 });
 
 // origin: test_metadata.

@@ -10,13 +10,46 @@ import {
 } from "near-api-js";
 import { Sandbox, DEFAULT_ACCOUNT_ID, DEFAULT_PRIVATE_KEY } from "near-sandbox";
 
+// Wave-3 teardown guard. Node's --test-force-exit skips after() hooks, so a
+// sandbox child can survive the runner. Register each sandbox and kill its
+// child synchronously on process exit or on a termination signal.
+const liveSandboxes = new Set();
+
+function killLiveSandboxes() {
+  for (const sandbox of liveSandboxes) {
+    try {
+      sandbox.childProcess?.kill("SIGKILL");
+    } catch {
+      // The child already exited; nothing is left to stop.
+    }
+  }
+  liveSandboxes.clear();
+}
+
+process.once("exit", killLiveSandboxes);
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => {
+    killLiveSandboxes();
+    process.exit(signal === "SIGINT" ? 130 : 143);
+  });
+}
+
 export const ONE = 10n ** 18n;
 export const TOKEN_SCALE = 1_000n * ONE;
 export const POOL_WASM = process.env.POOL_WASM ?? "target/near/krater_pool/krater_pool.wasm";
 export const MOCK_FT_WASM =
   process.env.MOCK_FT_WASM ?? "target/near/krater_mock_ft/krater_mock_ft.wasm";
 export const RPC_URL = process.env.RPC_URL;
-export const GAS = (tgas) => teraToGas(String(tgas));
+const gasCache = new Map();
+
+export const GAS = (tgas) => {
+  let value = gasCache.get(tgas);
+  if (value === undefined) {
+    value = teraToGas(String(tgas));
+    gasCache.set(tgas, value);
+  }
+  return value;
+};
 
 // Client gas budgets in Tgas. The pool's reserve-sync chain is static gas
 // (callbacks 90/80/70/60, 25 to fill, 45 to settle), so each attachment funds
@@ -87,9 +120,21 @@ export function kraterEvents(outcome) {
     .filter((event) => event.standard === "krater");
 }
 
+const NEAR_SUFFIX = /\s*NEAR$/i;
+const yoctoCache = new Map();
+
 export function toYocto(near) {
-  return nearToYocto(String(near).trim().replace(/\s*NEAR$/i, ""));
+  const key = String(near);
+  let value = yoctoCache.get(key);
+  if (value === undefined) {
+    value = nearToYocto(key.trim().replace(NEAR_SUFFIX, ""));
+    yoctoCache.set(key, value);
+  }
+  return value;
 }
+
+// Near-zero recompute instrumentation: distinct inputs cached, not total calls.
+export const recomputeCounters = () => ({ gas: gasCache.size, yocto: yoctoCache.size });
 
 export async function createAccount(provider, payer, accountId, nearAmount) {
   const keyPair = KeyPair.fromRandom("ED25519");
@@ -127,6 +172,7 @@ export async function bootSandbox({
   withCarol = false,
 } = {}) {
   const sandbox = await Sandbox.start({});
+  liveSandboxes.add(sandbox);
   const provider = new JsonRpcProvider({ url: sandbox.rpcUrl });
   const root = new Account(DEFAULT_ACCOUNT_ID, provider, DEFAULT_PRIVATE_KEY);
   const suffix = DEFAULT_ACCOUNT_ID;
