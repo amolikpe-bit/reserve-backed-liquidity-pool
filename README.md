@@ -2,7 +2,6 @@
 **A NEAR pool whose reserves are the real NEP-141 balances it holds.** Rebase, dividend, or taxed-transfer gains belong to the holders. No owner, pause, or upgrade path exists. Contract [`contracts/pool`](contracts/pool) (Rust, near-sdk 5.30.2), manifest [`manifest.json`](manifest.json), licence Apache-2.0.
 
 ```mermaid
-%%{init: {"theme":"base","themeVariables":{"fontSize":"14px"}}}%%
 sequenceDiagram
     accTitle: krater runtime flow
     accDescr: Harness drives the sandbox: deploy, mint, deposit, add liquidity, rebase, swap, withdraw, claim.
