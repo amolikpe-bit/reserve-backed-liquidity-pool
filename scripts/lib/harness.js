@@ -10,9 +10,9 @@ import {
 } from "near-api-js";
 import { Sandbox, DEFAULT_ACCOUNT_ID, DEFAULT_PRIVATE_KEY } from "near-sandbox";
 
-// Wave-3 teardown guard. Node's --test-force-exit skips after() hooks, so a
-// sandbox child can survive the runner. Register each sandbox and kill its
-// child synchronously on process exit or on a termination signal.
+// Guard against an orphaned sandbox child. Node's --test-force-exit skips
+// after() hooks, so a sandbox child can survive the runner. Register each
+// sandbox and kill its child on process exit or on a termination signal.
 const liveSandboxes = new Set();
 
 function killLiveSandboxes() {
@@ -192,9 +192,11 @@ export async function bootSandbox({
     ? await createAccount(provider, root, `carol.${suffix}`, "20 NEAR")
     : undefined;
 
-  await deploy(pool, poolId, poolWasm);
-  await deploy(rebasing, rebasingId, mockWasm);
-  await deploy(taxed, taxedId, mockWasm);
+  await Promise.all([
+    deploy(pool, poolId, poolWasm),
+    deploy(rebasing, rebasingId, mockWasm),
+    deploy(taxed, taxedId, mockWasm),
+  ]);
 
   await call(pool, poolId, "new", {
     token_a: rebasingId,

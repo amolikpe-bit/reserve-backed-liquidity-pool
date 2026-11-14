@@ -27,6 +27,7 @@ import {
   kraterEvents,
   register,
   view,
+  GAS,
   GAS_ADD_LIQUIDITY,
   GAS_CREDIT,
   GAS_PAYOUT,
@@ -38,7 +39,6 @@ import {
 } from "./lib/harness.js";
 
 const TEN = 10n * ONE;
-
 
 function gasBurnt(outcome) {
   if (!outcome || !outcome.transaction_outcome || !outcome.transaction_outcome.outcome) {

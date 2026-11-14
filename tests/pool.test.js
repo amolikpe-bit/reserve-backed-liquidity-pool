@@ -196,11 +196,13 @@ before(async () => {
   equalPair = await createAccount(root, equalPairId, "20 NEAR");
   badFee = await createAccount(root, badFeeId, "20 NEAR");
 
-  await deploy(pool, poolId, poolWasm);
-  await deploy(rebasing, rebasingId, mockWasm);
-  await deploy(taxed, taxedId, mockWasm);
-  await deploy(equalPair, equalPairId, poolWasm);
-  await deploy(badFee, badFeeId, poolWasm);
+  await Promise.all([
+    deploy(pool, poolId, poolWasm),
+    deploy(rebasing, rebasingId, mockWasm),
+    deploy(taxed, taxedId, mockWasm),
+    deploy(equalPair, equalPairId, poolWasm),
+    deploy(badFee, badFeeId, poolWasm),
+  ]);
 
   await call(pool, poolId, "new", {
     token_a: rebasingId,

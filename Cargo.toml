@@ -17,12 +17,11 @@ near-sdk = "5.30.2"
 near-sdk-contract-tools = "4.0.0"
 near-contract-standards = "5.30.2"
 primitive-types = { version = "=0.14.0", default-features = false }
-serde = "1"
 
 [profile.release]
 codegen-units = 1
 lto = true
-opt-level = "s"
+opt-level = "z"
 strip = true
 debug = false
 panic = "abort"

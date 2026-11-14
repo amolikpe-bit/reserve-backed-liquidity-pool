@@ -2,7 +2,7 @@
 
 **A NEAR pool whose reserves are the real NEP-141 balances it holds.** A rebase, a dividend or a taxed transfer changes what the pool is worth. Share holders own that change without an accounting step. The pool has no owner, no pause and no upgrade path.
 
-- Contract: [`contracts/pool`](contracts/pool) (Rust, near-sdk 5.30.1)
+- Contract: [`contracts/pool`](contracts/pool) (Rust, near-sdk 5.30.2)
 - Manifest: [`manifest.json`](manifest.json)
 - Licence: Apache-2.0
 
@@ -32,12 +32,12 @@ Settlement enters through the same standard:
 
 Requirements:
 
-- Rust 1.95 or newer (edition 2024)
+- Rust 1.100.0 or newer (edition 2024)
 - cargo-near 0.23.0,
 - near-cli-rs 0.31.1,
 - wasm-opt (binaryen)
-- Node 22.22.2 or newer
-- pnpm 10.4.1 or newer
+- Node 26.13.1 or newer
+- pnpm 12.18.0 or newer
 
 ```bash
 git clone https://github.com/nirholas/near-krater && cd near-krater && cargo near build non-reproducible-wasm && node scripts/demo.js
@@ -49,7 +49,7 @@ Registration is explicit. A NEP-141 transfer never registers its receiver. The s
 
 `non-reproducible-wasm` is the local build: it compiles without Docker. The default reproducible variant runs Docker against committed source. It needs the source pushed to deploy. Use it only for a pinned-image release. The quickstart does not cover it.
 
-`scripts/deploy.sh` builds both crates, then runs `scripts/optimize-wasm.sh` on the exact artifact it deploys. The script applies `wasm-opt -Oz --converge` with cargo-near's wasm feature set after its built-in `-O` pass. The measured pool wasm drops from 305,436 to 300,324 bytes (−1.67%). To run against a live network, set `RPC_URL` and the account/key variables listed in the script header instead. `scripts/deploy.sh` creates the accounts, deploys, initialises and registers them, and then locks the pool account.
+`scripts/deploy.sh` builds both crates, then runs `scripts/optimize-wasm.sh` on the exact artifact it deploys. The script applies `wasm-opt -Oz --converge` with cargo-near's wasm feature set. It also reorders module elements. It runs after the built-in `-O` pass. The release profile targets minimum code size. The measured pool wasm drops from 275,141 to 270,101 bytes (−1.83%). To run against a live network, set `RPC_URL` and the account/key variables listed in the script header instead. `scripts/deploy.sh` creates the accounts, deploys, initialises and registers them, and then locks the pool account.
 
 ## Executable spec
 
