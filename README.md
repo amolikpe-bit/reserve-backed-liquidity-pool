@@ -4,40 +4,42 @@
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"fontSize":"14px"}}}%%
 sequenceDiagram
+    accTitle: krater runtime flow
+    accDescr: Harness drives the sandbox: deploy, mint, deposit, add liquidity, rebase, swap, withdraw, claim.
     autonumber
     participant S as Harness
     participant C as Sandbox
     participant FT as PairFT
     participant P as kraterPool
-    rect rgb(226,238,255)
+    rect rgba(226,238,255,0.20)
     Note over S,FT: PHASE 1 — Deploy and register
     S->>C: bootSandbox(), createAccounts(4)
     S->>P: new(token_a, token_b, fee_bps)
     S->>FT: storage_deposit(pool)
     end
-    rect rgb(230,247,235)
+    rect rgba(230,247,235,0.20)
     Note over S,FT: PHASE 2 — Mint test tokens
     S->>FT: mint(alice, 5 * TOKEN_SCALE)
     end
-    rect rgb(255,244,214)
+    rect rgba(255,244,214,0.20)
     Note over S,P: PHASE 3 — Credit a deposit
     S->>FT: ft_transfer_call(pool, amount, "")
     FT->>P: ft_on_transfer(sender_id, amount, msg)
     P->>P: credit_deposit() at the reported index
     end
-    rect rgb(243,232,255)
+    rect rgba(243,232,255,0.20)
     Note over S,P: PHASE 4 — Add liquidity
     S->>P: add_liquidity(amounts, min_shares)
     P->>FT: ft_index(), ft_balance_of() x2
     P->>P: mint_shares(), lock MINIMUM_SHARES
     end
-    rect rgb(255,232,232)
+    rect rgba(255,232,232,0.20)
     Note over S,P: PHASE 5 — Sync and rebase
     S->>FT: rebase(factor_bps: 11_000)
     S->>P: sync_reserves()
     P-->>S: ReservesSynced, quote +9.99%
     end
-    rect rgb(224,247,250)
+    rect rgba(224,247,250,0.20)
     Note over S,P: PHASE 6 — Swap
     S->>FT: ft_transfer_call(pool, Swap)
     FT->>P: ft_on_transfer(), index_hop_a(true)
@@ -47,12 +49,12 @@ sequenceDiagram
     P-->>S: refund of the input
     end
     end
-    rect rgb(255,248,225)
+    rect rgba(255,248,225,0.20)
     Note over S,P: PHASE 7 — Withdraw shares
     S->>P: withdraw(shares)
     P->>P: settle_withdraw() burns, pays both legs
     end
-    rect rgb(233,236,239)
+    rect rgba(233,236,239,0.20)
     Note over S,P: PHASE 8 — Claim owed and events
     S->>P: claim_owed(token)
     S->>P: withdraw_deposit(token, amount)
