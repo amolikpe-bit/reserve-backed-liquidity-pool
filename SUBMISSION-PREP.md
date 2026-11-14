@@ -1,6 +1,6 @@
 # SUBMISSION-PREP — krater (LOCAL DRAFT, NOT SUBMITTED)
 
-Track: `memecoins` (spec `p0-memecoins.md`). Deadline 2026-11-14T23:59:00Z.
+Track: `defi` (spec `p0-defi.md`). Deadline 2026-11-14T23:59:00Z.
 No push, no remote, no tags, no X post, no submit. Local commit only.
 
 ## Judge quickstart (do X → see Y), MEASURED pre-Celesto-only
