@@ -148,3 +148,7 @@ Holding real tokens costs more per settlement than an accounting-only design. Th
 ## Origin and licence
 
 krater is a NEAR port of [`nirholas/rebase-absorb`](https://github.com/nirholas/rebase-absorb) (Apache-2.0, HEAD `c1665553`), rewritten from Solidity into Rust and NEP-141. The origin's LICENSE and NOTICE are retained verbatim; see [`ATTRIBUTION.md`](ATTRIBUTION.md) for the change summary and the dependency licence table. The pool keeps the origin's commitments: no owner, no pause, no upgrade. Behaviour treats the tokens' own mechanics as the source of truth.
+
+## Hackathon
+
+Track: `memecoins`. Development ends 2026-11-14T23:59:00Z (UTC).
